@@ -457,7 +457,12 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// [`BusHealth::failing`]: the device each failed read of the current run was pinned on — a servo,
 /// or the IMU board. "motor bus: 1 read failures running" said the bus dropped a read and not
 /// where, and on a robot whose drops are all one device's, the device is the whole finding.
-/// Additive: absent from an older `robotd`, and an empty list reads as "not told".
+///
+/// [`BusHealth::drops`] and [`BusHealth::unnamed_drops`]: every failed read since `robotd`
+/// started, by device. A count that resets on the next good read is invisible to a client
+/// sampling once a second; a total that only grows is not.
+///
+/// Additive: absent from an older `robotd`, and empty reads as "not told".
 pub const API_VERSION: u32 = 42;
 
 /// The observation width every policy this robot family runs is built against.
@@ -3681,6 +3686,15 @@ pub struct BusHealth {
     /// (the port itself) adds nothing, so a run can be counted with nobody named.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failing: Vec<u8>,
+    /// Failed reads since `robotd` started, by the device each stopped at — a servo ID, or
+    /// [`IMU_DXL_ID`]. Only ever grows, and that is the point: an isolated drop holds
+    /// `consecutive_errors` for one 20 ms tick, which a client sampling health once a second sees
+    /// one time in fifty. A total that went up says a drop happened in between, and where.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub drops: std::collections::BTreeMap<u8, u64>,
+    /// Failed reads since `robotd` started that the bus could not pin on a device.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unnamed_drops: u64,
 }
 
 impl BusHealth {
@@ -3700,6 +3714,24 @@ impl BusHealth {
         describe_devices(&self.failing)
     }
 
+    /// Every failed read since `robotd` started.
+    pub fn total_drops(&self) -> u64 {
+        self.drops.values().sum::<u64>() + self.unnamed_drops
+    }
+
+    /// Where the reads since `robotd` started dropped: `20 left_hip_yaw ×2, 32 head_yaw ×1`.
+    pub fn describe_drops(&self) -> String {
+        let mut by_device: Vec<String> = self
+            .drops
+            .iter()
+            .map(|(&id, n)| format!("{} ×{n}", describe_device(id)))
+            .collect();
+        if self.unnamed_drops > 0 {
+            by_device.push(format!("unknown device ×{}", self.unnamed_drops));
+        }
+        by_device.join(", ")
+    }
+
     /// The current run of failed reads, for a client to show while `consecutive_errors` is
     /// non-zero: `3 read failures running, at 200 imu`.
     pub fn describe_run(&self) -> String {
@@ -3713,14 +3745,19 @@ impl BusHealth {
     }
 }
 
-/// Bus devices as people read them: the ID printed on the part, and what it is.
+/// A bus device as people read it: the ID printed on the part, and what it is — `34 mouth`,
+/// `200 imu`.
+pub fn describe_device(id: u8) -> String {
+    match joint_of(id) {
+        Some(joint) => format!("{id} {joint}"),
+        None if id == IMU_DXL_ID => format!("{id} imu"),
+        None => id.to_string(),
+    }
+}
+
 fn describe_devices(ids: &[u8]) -> String {
     ids.iter()
-        .map(|&id| match joint_of(id) {
-            Some(joint) => format!("{id} {joint}"),
-            None if id == IMU_DXL_ID => format!("{id} imu"),
-            None => id.to_string(),
-        })
+        .map(|&id| describe_device(id))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -6640,6 +6677,21 @@ mod tests {
             ..BusHealth::default()
         };
         assert_eq!(unnamed.describe_run(), "1 read failure running");
+
+        let drops = BusHealth {
+            drops: [(32, 1), (20, 2)].into(),
+            unnamed_drops: 1,
+            ..BusHealth::default()
+        };
+        assert_eq!(drops.total_drops(), 4);
+        assert_eq!(
+            drops.describe_drops(),
+            "20 left_hip_yaw ×2, 32 head_yaw ×1, unknown device ×1"
+        );
+        // A map keyed by ID crosses JSON with string keys, and comes back the same.
+        let json = serde_json::to_string(&drops).unwrap();
+        assert!(json.contains(r#""drops":{"20":2,"32":1}"#), "{json}");
+        assert_eq!(serde_json::from_str::<BusHealth>(&json).unwrap(), drops);
         // Not told is not serialised: an older client sees the section it always did.
         let json = serde_json::to_string(&BusHealth::default()).unwrap();
         assert!(!json.contains("failing"), "{json}");

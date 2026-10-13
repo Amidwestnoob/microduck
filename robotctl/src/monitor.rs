@@ -2221,6 +2221,18 @@ impl View {
                 Style::new().fg(Color::Yellow),
             ));
         }
+        // Every drop since start, by device: a single drop is over within a tick, and a refresh
+        // later only these totals say it happened.
+        if health.bus.total_drops() > 0 {
+            said.push(Span::styled(
+                format!(
+                    " · bus {} dropped: {}",
+                    health.bus.total_drops(),
+                    health.bus.describe_drops()
+                ),
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+        }
 
         // A capped clock is said here rather than added to the temperatures below, and it takes
         // the board temperature with it. Two reasons, and they are the same one twice.

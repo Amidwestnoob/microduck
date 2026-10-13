@@ -2049,6 +2049,13 @@ fn render_health(report: &HealthReport) -> String {
                 (0, n) => format!("waiting for a robot to answer, {n} attempts"),
                 (_, _) => health.bus.describe_run(),
             };
+            let bus = match health.bus.total_drops() {
+                0 => bus,
+                n => format!(
+                    "{bus} · {n} dropped since start: {}",
+                    health.bus.describe_drops()
+                ),
+            };
             let _ = writeln!(out, "  {:<9} {bus}", "bus");
 
             if let Some(imu) = &health.imu {
@@ -7057,6 +7064,7 @@ mod tests {
                     consecutive_errors: 7,
                     startup_failures: 0,
                     failing: vec![34],
+                    drops: [(34, 7)].into(),
                     ..Default::default()
                 },
                 imu: Some(proto::ImuHealth {
@@ -7071,7 +7079,9 @@ mod tests {
         ));
 
         assert!(
-            out.contains("7 read failures running, at 34 mouth"),
+            out.contains(
+                "7 read failures running, at 34 mouth · 7 dropped since start: 34 mouth ×7"
+            ),
             "{out}"
         );
         assert!(out.contains("orientation frozen"), "{out}");

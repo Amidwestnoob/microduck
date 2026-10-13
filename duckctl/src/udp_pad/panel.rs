@@ -640,6 +640,14 @@ fn render_robot(frame: &mut ratatui::Frame, v: &View, area: Rect) {
                 Some(a) => Span::styled(a.text.clone(), a.level.style()),
                 None => Span::styled("bus ok", Style::new().fg(Color::Green)),
             });
+            // Drops since start: none of them is an alarm, all of them are where to look.
+            if h.bus.total_drops() > 0 {
+                motors.push(dim(format!(
+                    " · {} dropped: {}",
+                    h.bus.total_drops(),
+                    h.bus.describe_drops()
+                )));
+            }
             lines.push(row("motors", motors));
         }
     }

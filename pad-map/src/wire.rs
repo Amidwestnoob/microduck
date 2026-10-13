@@ -383,6 +383,8 @@ mod tests {
                     startup_failures: 0,
                     missing: (10..25).collect(),
                     failing: vec![proto::IMU_DXL_ID],
+                    drops: [(proto::IMU_DXL_ID, 3)].into(),
+                    unnamed_drops: 1,
                 },
                 ..Default::default()
             }),
