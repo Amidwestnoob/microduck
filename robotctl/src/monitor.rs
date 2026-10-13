@@ -2217,10 +2217,7 @@ impl View {
         // the temperatures for no information.
         if health.bus.consecutive_errors > 0 {
             said.push(Span::styled(
-                format!(
-                    " · bus {} read failures running",
-                    health.bus.consecutive_errors
-                ),
+                format!(" · bus {}", health.bus.describe_run()),
                 Style::new().fg(Color::Yellow),
             ));
         }

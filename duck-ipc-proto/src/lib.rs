@@ -451,7 +451,14 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// for servo power being off — about a robot whose fifteen servos had just answered their pings.
 /// Additive: absent from an older `robotd`, and `false` reads as "not told", which is what the old
 /// wording assumed anyway.
-pub const API_VERSION: u32 = 41;
+///
+/// # v42 — which device a run of failed bus reads stopped at
+///
+/// [`BusHealth::failing`]: the device each failed read of the current run was pinned on — a servo,
+/// or the IMU board. "motor bus: 1 read failures running" said the bus dropped a read and not
+/// where, and on a robot whose drops are all one device's, the device is the whole finding.
+/// Additive: absent from an older `robotd`, and an empty list reads as "not told".
+pub const API_VERSION: u32 = 42;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -578,6 +585,11 @@ pub const JOINT_IDS: [u8; 15] = [
     30, 31, 32, 33, 34, // neck, head, mouth
     10, 11, 12, 13, 14, // right leg
 ];
+
+/// The IMU board's Dynamixel ID. It rides the motor bus and answers first in the combined read, so
+/// it is a device [`BusHealth::failing`] can name. `duck-control` re-exports it, as it does
+/// [`JOINT_IDS`].
+pub const IMU_DXL_ID: u8 = 200;
 
 /// The joint a Dynamixel ID drives, if it is one of [`JOINT_IDS`].
 pub fn joint_of(id: u8) -> Option<&'static str> {
@@ -3660,6 +3672,15 @@ pub struct BusHealth {
     /// unplugged, and naming them is the point.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<u8>,
+    /// While `consecutive_errors` is non-zero: the device each failed read of the run stopped at,
+    /// once each, in the order first seen — a servo ID, or [`IMU_DXL_ID`]. Emptied with the count.
+    ///
+    /// The read is one transaction for every device, so this is where the answer went wrong, not
+    /// a proof the others are fine: a cable that breaks at one device silences every one past
+    /// it, and the first silent one is the one named. A failure the bus could not pin on a device
+    /// (the port itself) adds nothing, so a run can be counted with nobody named.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<u8>,
 }
 
 impl BusHealth {
@@ -3671,15 +3692,37 @@ impl BusHealth {
 
     /// The missing servos as people read them: `32 head_yaw, 33 head_roll`.
     pub fn describe_missing(&self) -> String {
-        self.missing
-            .iter()
-            .map(|&id| match joint_of(id) {
-                Some(joint) => format!("{id} {joint}"),
-                None => id.to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+        describe_devices(&self.missing)
     }
+
+    /// The devices the current run of failures stopped at, the same way: `200 imu, 34 mouth`.
+    pub fn describe_failing(&self) -> String {
+        describe_devices(&self.failing)
+    }
+
+    /// The current run of failed reads, for a client to show while `consecutive_errors` is
+    /// non-zero: `3 read failures running, at 200 imu`.
+    pub fn describe_run(&self) -> String {
+        let n = self.consecutive_errors;
+        let run = format!("{n} read failure{} running", if n == 1 { "" } else { "s" });
+        if self.failing.is_empty() {
+            run
+        } else {
+            format!("{run}, at {}", self.describe_failing())
+        }
+    }
+}
+
+/// Bus devices as people read them: the ID printed on the part, and what it is.
+fn describe_devices(ids: &[u8]) -> String {
+    ids.iter()
+        .map(|&id| match joint_of(id) {
+            Some(joint) => format!("{id} {joint}"),
+            None if id == IMU_DXL_ID => format!("{id} imu"),
+            None => id.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The IMU board, which rides the motor bus.
@@ -6578,6 +6621,28 @@ mod tests {
 
         assert_eq!(answer.bus.consecutive_errors, 2);
         assert_eq!(answer.bus.startup_failures, 0);
+    }
+
+    #[test]
+    fn the_devices_a_run_stopped_at_name_the_imu_board_too() {
+        let bus = BusHealth {
+            consecutive_errors: 2,
+            failing: vec![IMU_DXL_ID, 34, 99],
+            ..BusHealth::default()
+        };
+        assert_eq!(bus.describe_failing(), "200 imu, 34 mouth, 99");
+        assert_eq!(
+            bus.describe_run(),
+            "2 read failures running, at 200 imu, 34 mouth, 99"
+        );
+        let unnamed = BusHealth {
+            consecutive_errors: 1,
+            ..BusHealth::default()
+        };
+        assert_eq!(unnamed.describe_run(), "1 read failure running");
+        // Not told is not serialised: an older client sees the section it always did.
+        let json = serde_json::to_string(&BusHealth::default()).unwrap();
+        assert!(!json.contains("failing"), "{json}");
     }
 
     /// An absent battery must stay absent, not become zero volts.

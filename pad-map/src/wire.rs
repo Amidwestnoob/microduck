@@ -382,6 +382,7 @@ mod tests {
                     consecutive_errors: 3,
                     startup_failures: 0,
                     missing: (10..25).collect(),
+                    failing: vec![proto::IMU_DXL_ID],
                 },
                 ..Default::default()
             }),
