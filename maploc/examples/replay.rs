@@ -44,6 +44,8 @@ struct Export {
     poses: Vec<PoseOut>,
     events: Vec<EventOut>,
     grid: Option<GridOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grids: Vec<TimedGrid>,
 }
 
 #[derive(Serialize)]
@@ -78,6 +80,36 @@ struct GridOut {
     w: usize,
     h: usize,
     rows: Vec<String>,
+}
+
+/// The map as it stood after an event that changed it, for drawing it being built.
+#[derive(Serialize)]
+struct TimedGrid {
+    t_ns: u64,
+    #[serde(flatten)]
+    grid: GridOut,
+}
+
+fn grid_out(g: &maploc::grid::OccupancyGrid) -> GridOut {
+    GridOut {
+        res: g.res,
+        origin: g.origin,
+        w: g.w,
+        h: g.h,
+        rows: g
+            .cells
+            .chunks(g.w)
+            .map(|row| {
+                row.iter()
+                    .map(|c| match c {
+                        Cell::Occupied => '#',
+                        Cell::Free => '.',
+                        Cell::Unknown => '?',
+                    })
+                    .collect()
+            })
+            .collect(),
+    }
 }
 
 fn xyt(p: Pose2) -> [f64; 3] {
@@ -119,6 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     let mut out = PathBuf::from("map.ppm");
     let mut export_to: Option<PathBuf> = None;
+    let mut grids = false;
     let mut res = 0.025;
     let mut cfg = MapperConfig::default();
     let mut quiet = false;
@@ -157,6 +190,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--export" => export_to = Some(args.next().ok_or("--export needs a path")?.into()),
             "--res" => res = args.next().ok_or("--res needs a number")?.parse()?,
+            // Also export the grid after every event that changed it: stops, relocalizations,
+            // loop closures — the map being built, for a video.
+            "--grids" => grids = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -202,6 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         poses: Vec::new(),
         events: Vec::new(),
         grid: None,
+        grids: Vec::new(),
     };
     let mut t_state = 0u64;
     let mut next_pose_ns = 0u64;
@@ -221,7 +258,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ev::Depth(f) => m.on_depth(f),
         }
-        for ev in m.take_events() {
+        let evs = m.take_events();
+        let changed = evs.iter().any(|e| {
+            matches!(
+                e,
+                Event::Keyframe { .. } | Event::Relocalized { .. } | Event::LoopClosed { .. }
+            )
+        });
+        if grids
+            && changed
+            && let Some(g) = m.grid(res)
+        {
+            export.grids.push(TimedGrid {
+                t_ns: t_state,
+                grid: grid_out(&g),
+            });
+        }
+        for ev in evs {
             export.events.push(EventOut {
                 t_ns: t_state,
                 kind: kind(&ev),
@@ -281,25 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let grid = m.grid(res);
     if let Some(path) = &export_to {
-        export.grid = grid.as_ref().map(|g| GridOut {
-            res: g.res,
-            origin: g.origin,
-            w: g.w,
-            h: g.h,
-            rows: g
-                .cells
-                .chunks(g.w)
-                .map(|row| {
-                    row.iter()
-                        .map(|c| match c {
-                            Cell::Occupied => '#',
-                            Cell::Free => '.',
-                            Cell::Unknown => '?',
-                        })
-                        .collect()
-                })
-                .collect(),
-        });
+        export.grid = grid.as_ref().map(grid_out);
         std::fs::write(path, serde_json::to_vec(&export)?)?;
         println!(
             "exported {} stops, {} poses, {} events to {}",
