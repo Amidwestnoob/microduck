@@ -219,6 +219,10 @@ robot does. That keeps authority where `architecture.md` §6 puts it.
   repository: each stop's odometry pose, live pose and final optimized pose, the tracked pose at
   10 Hz with why it was lost, every event, and the grid (`--res`, one character a cell).
 - `cargo test -p mapd` — the service end to end, minus its two upstream sockets.
+- **The regression gate**: `maploc_truth`'s `scripts/bench.py` replays this checkout's `maploc` on
+  every ground-truth session and its kidnap suite and fails if anything got worse than the saved
+  baseline — never a wrong relocalization, never a recovery lost, accuracy only within the replay's
+  noise. Run it before merging any change to `maploc`; move the baseline only for a stated trade-off.
 
 **Kidnaps from one recording.** `maploc_truth/scripts/kidnap.py` cuts the ground-truth session at
 t1 and resumes it at t2, odometry's position held across the gap (heading carried on, as the gyro
