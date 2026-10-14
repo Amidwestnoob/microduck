@@ -704,8 +704,9 @@ fn read_camera(socket: &Path, tx: &mpsc::Sender<Update>, asked_for: &Receiver<bo
 /// closure bends the map and adds no stop).
 const MAP_POLL: Duration = Duration::from_millis(500);
 const MAP_GRID_REFRESH: Duration = Duration::from_secs(10);
-/// The grid's resolution here: fine enough that a wall is a line in a braille panel.
-const MAP_RES_M: f64 = 0.05;
+/// The grid's resolution here: maploc's own, so a full-screen map of a room is about a cell a
+/// pixel.
+const MAP_RES_M: f64 = 0.025;
 
 fn poll_map(socket: &Path, tx: &mpsc::Sender<Update>) {
     loop {
