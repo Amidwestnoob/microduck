@@ -127,6 +127,19 @@ pub struct MapperConfig {
     pub boot_yaw_tol_rad: f64,
     /// Stops chained into one scan for a wide search.
     pub composite_keyframes: usize,
+    /// A wide match's position is pinned when its spread is under this, in its least-constrained
+    /// direction. Absolute, not a fraction of the window: a whole-map window makes "40 % of the
+    /// window" a metre.
+    pub reloc_max_sigma_xy_m: f64,
+    /// Its heading is pinned when the scan narrows it this far — or when the window was already
+    /// this narrow from the gyro, which holds heading through a carry.
+    pub reloc_max_sigma_yaw_rad: f64,
+    pub reloc_yaw_prior_rad: f64,
+    /// A tracking match moving the stop further than this from where odometry put it is not
+    /// believed: odometry between two stops is good to a few centimetres and a degree or two
+    /// (measured), and a narrow scan that fits 40 cm away is fitting the wrong wall.
+    pub track_max_correction_m: f64,
+    pub track_max_correction_rad: f64,
 }
 
 impl Default for MapperConfig {
@@ -138,7 +151,8 @@ impl Default for MapperConfig {
             matcher: MatchConfig::default(),
             graph: GraphConfig::default(),
             odometry: OdometryNoise::default(),
-            tof_latency_ms: 10.0,
+            // Measured (see ProjectConfig): returns land best 60 ms before their stamp.
+            tof_latency_ms: 60.0,
             settle_s: 0.4,
             still_speed_mps: 0.03,
             still_turn_rps: 0.08,
@@ -162,21 +176,28 @@ impl Default for MapperConfig {
             wide_min_margin: 3.0,
             wide_min_hit_frac: 0.6,
             wide_min_span_rad: 60f64.to_radians(),
-            agree_m: 0.15,
+            // Two stops' relocalization candidates are a few seconds of odometry apart, good to a
+            // few cm a stop; 0.15 m refused the one right join on the ground-truth set (0.19 m).
+            agree_m: 0.25,
             agree_rad: 4f64.to_radians(),
-            carry_yaw_tol_rad: 15f64.to_radians(),
+            carry_yaw_tol_rad: 8f64.to_radians(),
             brief_pickup_s: 2.0,
             bumped_xy_tol_m: 0.5,
             bumped_yaw_tol_rad: 25f64.to_radians(),
             sat_xy_tol_m: 0.15,
             sat_yaw_tol_rad: 10f64.to_radians(),
-            local_search_keyframes: 4,
-            fallback_yaw_tol_rad: 30f64.to_radians(),
+            local_search_keyframes: 2,
+            fallback_yaw_tol_rad: 8f64.to_radians(),
             fall_xy_tol_m: 0.5,
             fall_yaw_tol_rad: 20f64.to_radians(),
             boot_xy_tol_m: 0.3,
             boot_yaw_tol_rad: 15f64.to_radians(),
             composite_keyframes: 3,
+            reloc_max_sigma_xy_m: 0.08,
+            reloc_max_sigma_yaw_rad: 3f64.to_radians(),
+            reloc_yaw_prior_rad: 10f64.to_radians(),
+            track_max_correction_m: 0.10,
+            track_max_correction_rad: 3f64.to_radians(),
         }
     }
 }
@@ -245,6 +266,12 @@ pub enum Event {
         from: usize,
         to: usize,
         correction: Pose2,
+    },
+    /// Picked up for a moment and put back near where it was: still tracking, and the next stop
+    /// is matched in a window this wide instead of the usual one.
+    Bumped {
+        xy_tol: f64,
+        yaw_tol: f64,
     },
     Lost {
         cause: LostCause,
@@ -357,6 +384,8 @@ pub struct Mapper {
     /// When the current pick-up began, and the map-from-odometry transform from before it.
     pickup_since: Option<u64>,
     broke_from: Option<Pose2>,
+    /// After a bump: the next tracking match's window, wider than odometry alone would want.
+    widen: Option<(f64, f64)>,
     events: Vec<Event>,
 }
 
@@ -398,6 +427,7 @@ impl Mapper {
             sitting: false,
             pickup_since: None,
             broke_from: None,
+            widen: None,
             events: Vec::new(),
         }
     }
@@ -647,16 +677,15 @@ impl Mapper {
             && held_s < self.cfg.brief_pickup_s
             && self.lost_keyframes == 0
         {
-            self.loc = Loc::Lost {
-                cause: LostCause::Bumped,
-                hint: Hint::Pose {
-                    map_from_odom,
-                    xy_tol: self.cfg.bumped_xy_tol_m,
-                    yaw_tol: self.cfg.bumped_yaw_tol_rad,
-                },
-            };
-            self.events.push(Event::Lost {
-                cause: LostCause::Bumped,
+            // Measured on the ground-truth set: brief pick-ups put the robot back within ~40 cm
+            // and a few degrees, while odometry's heading held. Going lost over one asked for a
+            // relocalization the narrow ToF rarely gets; staying on track and widening the next
+            // match keeps the map, and odometry carries on if that match is not convincing.
+            self.loc = Loc::Tracking { map_from_odom };
+            self.widen = Some((self.cfg.bumped_xy_tol_m, self.cfg.bumped_yaw_tol_rad));
+            self.events.push(Event::Bumped {
+                xy_tol: self.cfg.bumped_xy_tol_m,
+                yaw_tol: self.cfg.bumped_yaw_tol_rad,
             });
         }
     }
@@ -838,10 +867,15 @@ impl Mapper {
         };
         let syaw =
             noise.base_yaw_rad + noise.yaw_per_rad * self.turn_since_yaw + noise.yaw_per_s * dt_yaw;
+        let (wxy, wyaw) = self.widen.take().unwrap_or((0.0, 0.0));
         let win = Window {
             center: predicted,
-            half_xy: (3.0 * sxy).clamp(self.cfg.track_min_xy_m, self.cfg.track_max_xy_m),
-            half_yaw: (3.0 * syaw).clamp(self.cfg.track_min_yaw_rad, self.cfg.track_max_yaw_rad),
+            half_xy: (3.0 * sxy)
+                .clamp(self.cfg.track_min_xy_m, self.cfg.track_max_xy_m)
+                .max(wxy),
+            half_yaw: (3.0 * syaw)
+                .clamp(self.cfg.track_min_yaw_rad, self.cfg.track_max_yaw_rad)
+                .max(wyaw),
             step_yaw: 1f64.to_radians(),
         };
         let m = self
@@ -854,6 +888,11 @@ impl Mapper {
                 && m.hit_frac >= self.cfg.min_hit_frac
                 && m.conflict_frac <= self.cfg.max_conflict
                 && m.rank > 0
+                && {
+                    let c = predicted.between(m.pose);
+                    c.x.hypot(c.y) <= self.cfg.track_max_correction_m
+                        && c.yaw.abs() <= self.cfg.track_max_correction_rad
+                }
         });
         let contradicts = m.as_ref().is_some_and(|(m, _)| {
             m.n_points >= self.cfg.min_match_points
@@ -987,12 +1026,18 @@ impl Mapper {
         self.keyframes[node].composite(&others)
     }
 
-    fn wide_ok(&self, m: &MatchResult, margin: f64, span: f64) -> bool {
-        self.wide_refusal(m, margin, span).is_none()
+    fn wide_ok(&self, m: &MatchResult, margin: f64, span: f64, half_yaw: f64) -> bool {
+        self.wide_refusal(m, margin, span, half_yaw).is_none()
     }
 
     /// The first gate a wide match fails, said with its numbers — `None` when it passes them all.
-    fn wide_refusal(&self, m: &MatchResult, margin: f64, span: f64) -> Option<String> {
+    fn wide_refusal(
+        &self,
+        m: &MatchResult,
+        margin: f64,
+        span: f64,
+        half_yaw: f64,
+    ) -> Option<String> {
         let c = &self.cfg;
         if span < c.wide_min_span_rad {
             return Some(format!(
@@ -1007,8 +1052,25 @@ impl Mapper {
                 m.n_points, c.min_match_points
             ));
         }
-        if m.rank < 3 {
-            return Some(format!("pins {} of 3 directions", m.rank));
+        // Pinned in absolute terms. Measured on the ground-truth set: a whole-map search after a
+        // carry found the right place to a few centimetres, and was refused because the scan
+        // alone did not narrow the heading to 40 % of a ±30° window — a heading the gyro had kept.
+        let (xy_vals, _) = crate::matcher::eigen_sym3([
+            [m.cov[0][0], m.cov[0][1], 0.0],
+            [m.cov[1][0], m.cov[1][1], 0.0],
+            [0.0, 0.0, 0.0],
+        ]);
+        let sxy = xy_vals.iter().cloned().fold(0.0, f64::max).sqrt();
+        if sxy > c.reloc_max_sigma_xy_m {
+            return Some(format!("position not pinned: ±{:.0} cm", 100.0 * sxy));
+        }
+        let syaw = m.cov[2][2].sqrt();
+        if syaw > c.reloc_max_sigma_yaw_rad && half_yaw > c.reloc_yaw_prior_rad {
+            return Some(format!(
+                "heading not pinned: ±{:.1}° in a ±{:.0}° window",
+                syaw.to_degrees(),
+                half_yaw.to_degrees()
+            ));
         }
         if m.hit_frac < c.wide_min_hit_frac {
             return Some(format!(
@@ -1069,7 +1131,7 @@ impl Mapper {
         let Some(w) = match_wide(&field, &scan, win, &self.cfg.matcher) else {
             return;
         };
-        if !self.wide_ok(&w.best, w.margin, scan.span_rad) {
+        if !self.wide_ok(&w.best, w.margin, scan.span_rad, self.cfg.loop_half_yaw_rad) {
             self.pending_loop = None;
             return;
         }
@@ -1313,10 +1375,12 @@ impl Mapper {
                 .push(searched(None, "this stop saw no obstacles".into()));
             return;
         };
-        if let Some(why) = self.wide_refusal(&w.best, w.margin, scan.span_rad) {
+        if let Some(why) = self.wide_refusal(&w.best, w.margin, scan.span_rad, half_yaw) {
             self.events
                 .push(searched(Some(w.best.pose), format!("refused — {why}")));
-            self.pending_reloc = None;
+            // An undecided stop is not evidence against the candidate before it: keep it for the
+            // next stop to confirm. (Measured: a right candidate erased by a margin of 2.9 < 3.0.)
+            // A carry still clears it — the island ends there.
             // A parked hint only holds for the first stop after boot; fall back to the whole map.
             if let (Hint::Parked { .. }, LostCause::Boot) = (hint, cause) {
                 self.loc = Loc::Lost {

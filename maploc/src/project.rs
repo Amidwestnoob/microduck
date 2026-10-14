@@ -17,7 +17,7 @@
 //! centimetres of a beam that lands on the floor. That is less free space per frame than carving
 //! whole rays, and it is the only kind that is true.
 
-use kinematics::Pose;
+use kinematics::{Pose, Quat};
 use serde::{Deserialize, Serialize};
 
 use crate::input::{DepthFrame, StateSample};
@@ -48,6 +48,9 @@ pub struct ProjectConfig {
     pub ceiling_m: f64,
     /// A beam proves floor-level free space only where it runs at or below this height.
     pub free_height_m: f64,
+    /// A turn of the sensor about its own +y (left) axis that the head's kinematics do not know
+    /// about — a mount or head-calibration error. Positive tips the beams down.
+    pub pitch_offset_rad: f64,
 }
 
 impl Default for ProjectConfig {
@@ -56,11 +59,17 @@ impl Default for ProjectConfig {
             statuses: vec![5, 9],
             min_range_m: 0.08,
             max_range_m: 2.0,
-            range_is_axial: false,
+            // Measured against a scanned room (graphite-bang, 2026-10-14): with the true pose,
+            // axial range puts the returns on the room's obstacles (58 → 69 % within 5 cm).
+            range_is_axial: true,
             floor_margin_m: 0.03,
             floor_margin_per_m: 0.03,
             ceiling_m: 0.40,
             free_height_m: 0.04,
+            // Same measurement: the sensor sits ~3° further down than the head's kinematics say
+            // (69 → 81 % with the 60 ms latency). Measured on one alpha; a per-robot number when
+            // more are measured.
+            pitch_offset_rad: 3f64.to_radians(),
         }
     }
 }
@@ -105,7 +114,11 @@ impl Projector {
 
     /// Place `frame` using the robot state at its capture instant.
     pub fn project(&self, frame: &DepthFrame, state: &StateSample) -> Projected {
-        let sensor: Pose = state.trunk_pose() * state.tof_in_trunk;
+        let mut sensor: Pose = state.trunk_pose() * state.tof_in_trunk;
+        if self.cfg.pitch_offset_rad != 0.0 {
+            sensor.quat =
+                sensor.quat * Quat::from_axis_angle([0.0, 1.0, 0.0], self.cfg.pitch_offset_rad);
+        }
         let o = sensor.pos;
         let mut out = Projected {
             t_ns: frame.t_ns,
@@ -161,6 +174,16 @@ mod tests {
     use crate::input::Activity;
     use kinematics::Quat;
 
+    /// The sensor these tests draw frames for: ranges along each beam, mounted exactly where
+    /// the kinematics say — the geometry, not the real sensor's quirks.
+    fn ideal() -> ProjectConfig {
+        ProjectConfig {
+            range_is_axial: false,
+            pitch_offset_rad: 0.0,
+            ..ProjectConfig::default()
+        }
+    }
+
     /// A level sensor 25 cm up, pitched down by `pitch` radians.
     fn state(pitch: f64) -> StateSample {
         StateSample {
@@ -190,7 +213,7 @@ mod tests {
         // the box and hit the wall; lower rows hit the box. Projected in 3D, the wall rows prove
         // no floor free in front of the wall — they never run below 4 cm — so nothing votes the
         // box's cells free.
-        let p = Projector::new(ProjectConfig::default());
+        let p = Projector::new(ideal());
         let s = state(0.0);
         let mut f = frame(1500);
         let beams = *kinematics::tof::Reprojector::alpha().beams();
@@ -211,7 +234,7 @@ mod tests {
 
     #[test]
     fn a_table_top_is_overhead_not_a_wall() {
-        let p = Projector::new(ProjectConfig::default());
+        let p = Projector::new(ideal());
         // Head tilted up ~34°: even the bottom row climbs 14°, and is above 40 cm by 0.8 m.
         let s = state(-0.6);
         let out = p.project(&frame(800), &s);
@@ -221,7 +244,7 @@ mod tests {
 
     #[test]
     fn floor_returns_prove_the_floor_near_where_they_land() {
-        let p = Projector::new(ProjectConfig::default());
+        let p = Projector::new(ideal());
         let s = state(0.5); // looking down ~29°
         let sensor = s.trunk_pose() * s.tof_in_trunk;
         let mut f = frame(0);

@@ -102,6 +102,7 @@ fn kind(e: &Event) -> &'static str {
         Event::Discarded { .. } => "discarded",
         Event::LoopClosed { .. } => "loop_closed",
         Event::Lost { .. } => "lost",
+        Event::Bumped { .. } => "bumped",
         Event::Relocalized { .. } => "relocalized",
         Event::EdgeRejected { .. } => "edge_rejected",
         Event::Searched { .. } => "searched",
@@ -128,7 +129,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cfg.tof_latency_ms = args.next().ok_or("--latency-ms needs a number")?.parse()?
             }
             "--axial" => cfg.project.range_is_axial = true,
+            "--tof-pitch-deg" => {
+                cfg.project.pitch_offset_rad = args
+                    .next()
+                    .ok_or("--tof-pitch-deg needs a number")?
+                    .parse::<f64>()?
+                    .to_radians()
+            }
+            "--max-range" => {
+                cfg.project.max_range_m =
+                    args.next().ok_or("--max-range needs a number")?.parse()?
+            }
             "--quiet" => quiet = true,
+            // Any MapperConfig field by its path, e.g. `--set min_hit_frac=0.6` or
+            // `--set project.range_is_axial=true`: the bench's knob for trying a setting
+            // without a rebuild. The value is read as JSON, or as a string if it is not.
+            "--set" => {
+                let kv = args.next().ok_or("--set needs key=value")?;
+                let (k, v) = kv.split_once('=').ok_or("--set needs key=value")?;
+                let mut root = serde_json::to_value(&cfg)?;
+                let mut at = &mut root;
+                for part in k.split('.') {
+                    at = at.get_mut(part).ok_or_else(|| format!("no setting {k}"))?;
+                }
+                *at = serde_json::from_str(v).unwrap_or(serde_json::Value::String(v.to_owned()));
+                cfg = serde_json::from_value(root)?;
+            }
             "--export" => export_to = Some(args.next().ok_or("--export needs a path")?.into()),
             "--res" => res = args.next().ok_or("--res needs a number")?.parse()?,
             other => return Err(format!("unknown argument {other}").into()),
@@ -226,7 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Lost { .. } => lost += 1,
                 Event::Relocalized { .. } => reloc += 1,
                 Event::Discarded { .. } => discarded += 1,
-                Event::Searched { .. } => {}
+                Event::Searched { .. } | Event::Bumped { .. } => {}
             }
             if !quiet {
                 println!("{ev:?}");

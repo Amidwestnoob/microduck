@@ -1036,7 +1036,7 @@ impl Default for MapParams {
             path: PathBuf::from("/var/lib/mapd/map.json"),
             autosave_s: 60,
             state_hz: 25,
-            tof_latency_ms: 10.0,
+            tof_latency_ms: 60.0,
         }
     }
 }

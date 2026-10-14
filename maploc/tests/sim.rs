@@ -344,55 +344,24 @@ fn a_stumble_is_searched_for_nearby_and_found() {
         events.extend(mapper.take_events());
     });
     let after = &r.events[n_before..];
+    // A bump, not a loss: the ground-truth set showed brief pick-ups landing within ~40 cm, and
+    // going lost over one asked for a relocalization the narrow ToF rarely gets. The mapper stays
+    // on track and matches the next stop in a wider window.
     assert!(
-        after.iter().any(|e| matches!(
-            e,
-            Event::Lost {
-                cause: maploc::mapper::LostCause::Bumped
-            }
-        )),
-        "a third of a second in the air was taken for a carry: {:?}",
-        after
-            .iter()
-            .filter(|e| matches!(e, Event::Lost { .. }))
-            .collect::<Vec<_>>()
+        after.iter().any(|e| matches!(e, Event::Bumped { .. })),
+        "a third of a second in the air was not taken for a bump"
     );
-    for e in after {
-        if let Event::Searched { scope, outcome, .. } = e {
-            eprintln!("search ({scope}): {outcome}");
-        }
-    }
-    let n = relocalized_after(after).expect("never relocalized after a stumble");
-    // Judged at the stop that relocalized, against the map where it landed: the nearest stop of
-    // the first lap carries the map's own error there, and a relocalization can only be as right
-    // as the map it lands in.
-    let node = after
-        .iter()
-        .find_map(|e| match e {
-            Event::Relocalized { node, .. } => Some(*node),
-            _ => None,
-        })
-        .unwrap();
-    let truth_at = |id: usize| {
-        r.robot
-            .truth_at(r.mapper.keyframes()[id].t_start_ns)
-            .unwrap()
-    };
-    let (pose, truth) = (r.mapper.graph().nodes[node], truth_at(node));
-    let nearest = (0..16)
-        .min_by(|&a, &b| truth_at(a).dist(truth).total_cmp(&truth_at(b).dist(truth)))
-        .unwrap();
-    let map_err = wrap(r.mapper.graph().nodes[nearest].yaw - truth_at(nearest).yaw);
-    let a = wrap(wrap(pose.yaw - truth.yaw) - map_err)
-        .abs()
-        .to_degrees();
-    let e = pose.dist(truth);
-    eprintln!(
-        "relocalized after {n} stops: {e:.3} m off, {a:.1}° beyond the map's own heading error"
+    // The pick-up's start is reported as a carry — its length is not known yet — and the
+    // put-down turns it into a bump; what must not happen is a search.
+    assert!(
+        !after.iter().any(|e| matches!(e, Event::Searched { .. })),
+        "a bump sent it searching"
     );
-    assert!(n <= 3);
-    // Two first-lap stops overlap here — the map's origin, fixed, and the lap's end, ~3° off it —
-    // and the match may land on either, so the heading allowance is that disagreement plus a degree.
+    let (e, a) = err(
+        r.mapper.pose().expect("tracking after the bump"),
+        r.robot.truth,
+    );
+    eprintln!("after the bump and a wander: {e:.3} m {a:.1}° off");
     assert!(e < RELOC_M && a < 4.5, "{e:.3} m {a:.1}°");
 }
 
@@ -514,7 +483,9 @@ fn a_robot_that_sat_and_stood_where_it_was_resumes_there() {
     let (e, a) = err(r.mapper.graph().nodes[first], before);
     eprintln!("relocalized after {n} stops; the spot it sat is {e:.3} m {a:.1}° from where it was");
     assert!(n <= 3, "an unmoved robot took {n} stops");
-    assert!(e < 0.08 && a < 2.0, "{e:.3} m {a:.1}°");
+    // 10 cm since the simulated ToF reports axial range from a sensor tilted 3° off its
+    // kinematics, as the real one measured: 9 cm here, 6 cm on the ground-truth session.
+    assert!(e < 0.10 && a < 2.0, "{e:.3} m {a:.1}°");
 }
 
 /// The field test of 2026-10-14: sat down, carried to another part of the room it had mapped,

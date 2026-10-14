@@ -333,6 +333,11 @@ fn log_event(e: &Event) {
             "loop closed"
         ),
         Event::Lost { cause } => tracing::warn!(cause = lost_name(*cause), "lost"),
+        Event::Bumped { xy_tol, yaw_tol } => tracing::info!(
+            xy_tol,
+            yaw_tol_deg = yaw_tol.to_degrees(),
+            "bumped: still tracking, the next stop is matched wider"
+        ),
         Event::Relocalized {
             node,
             pose,

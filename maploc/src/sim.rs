@@ -168,6 +168,9 @@ pub struct Robot {
     pub range_noise_m: f64,
     /// The sensor stops reporting beyond this.
     pub max_range_m: f64,
+    /// The sensor's turn about its own +y that the kinematic model does not know — the real
+    /// head's, measured (`ProjectConfig::pitch_offset_rad`).
+    pub tof_pitch_error_rad: f64,
     pub head_pitch: f64,
     next_frame_ns: u64,
     rng: u64,
@@ -196,9 +199,10 @@ impl Robot {
             truth: start,
             odom: start,
             t_ns: 1_000_000_000,
-            tof_latency_ns: 10_000_000,
+            tof_latency_ns: 60_000_000,
             range_noise_m: 0.01,
             max_range_m: 1.6,
+            tof_pitch_error_rad: 3f64.to_radians(),
             head_pitch: 8f64.to_radians(),
             next_frame_ns: 1_000_000_000,
             rng: 0x2545_f491_4f6c_dd1d,
@@ -373,7 +377,9 @@ impl Robot {
             [self.truth.x, self.truth.y, 0.12],
             self.trunk_quat(self.truth.yaw, pitch),
         );
-        let sensor = trunk * self.tof_in_trunk();
+        let mut sensor = trunk * self.tof_in_trunk();
+        sensor.quat =
+            sensor.quat * Quat::from_axis_angle([0.0, 1.0, 0.0], self.tof_pitch_error_rad);
         let beams = *kinematics::tof::Reprojector::alpha().beams();
         let mut distance_mm = vec![0i16; 64];
         let mut status = vec![0u8; 64];
@@ -382,7 +388,8 @@ impl Robot {
             if let Some(t) = self.world.cast(sensor.pos, d)
                 && t <= self.max_range_m
             {
-                let r = t + self.range_noise_m * 2.0 * self.noise();
+                // The VL53L5CX reports distance along its optical axis, not along each zone's beam.
+                let r = t * b[0] + self.range_noise_m * 2.0 * self.noise();
                 distance_mm[i] = (r * 1000.0) as i16;
                 status[i] = 5;
             }

@@ -84,6 +84,14 @@ wide as the window in that direction, and the edge's information there is zero. 
 odometry for it. The first maploc returned a pose anyway — the corner of its search window on a
 flat score — at a fixed 5 cm in every direction.
 
+**A match is believed only within odometry's reach.** Measured on the ground-truth session
+(`pollen-robotics/SLAM_JJ_Salon_with_GT`): odometry between two stops is good to a few centimetres
+and a degree or two, and the whole 4-minute session stays within ~5 cm on odometry alone — while
+narrow scans that fit a wall 30–50 cm away scored 95 % on walls and rank 3. A tracking match that
+moves the stop further than `track_max_correction_m` / `track_max_correction_rad` from the
+prediction is not believed. With the gate the matches are neutral to slightly helpful on that
+session (stops within 3.3 cm median, 7.7 cm worst); without it they made the pose 7× worse.
+
 **The weights are honest.** Odometry edges grow with distance walked (separately along and across
 the direction of travel) and angle turned; heading is the gyro's and is believed. The first graph
 gave every odometry edge a flat 0.10 m / 0.05 rad, which handed one loop closure ~96 % of the yaw
@@ -106,7 +114,6 @@ feet are in the air, but the gyro's heading still holds), a **fall**, a **sit**,
 | cause | hint | search |
 |---|---|---|
 | carried | the heading | the whole map, ±`carry_yaw_tol_rad` |
-| bumped — picked up for under `brief_pickup_s` | the pose | ±`bumped_xy_tol_m`, ±`bumped_yaw_tol_rad` |
 | sat — stood up again | the pose it sat at | ±`sat_xy_tol_m`, ±`sat_yaw_tol_rad` |
 | fell | the pose, roughly | ±`fall_xy_tol_m`, ±`fall_yaw_tol_rad` |
 | boot | where it was switched off | there first, then the whole map at every heading |
@@ -115,8 +122,12 @@ feet are in the air, but the gyro's heading still holds), a **fall**, a **sit**,
 **A brief pick-up is not a carry.** On the robot the pick-up detector fires as a fall begins —
 measured on graphite: "picked up" for 0.36 s, put down, then the limp fall 0.06 s later. Read as a
 carry, that threw the position away and searched a thin map everywhere, and the robot never found
-itself. Nobody carries a duck anywhere in two seconds, so a pick-up that short is searched for
-nearby. A nearby search (bumped, sat, fell, contradiction) that fails `local_search_keyframes` stops in a
+itself. Nobody carries a duck anywhere in two seconds, so a pick-up that short is a **bump**: the mapper
+keeps tracking — it reports `Bumped`, not lost — and matches the next stop in a window
+±`bumped_xy_tol_m` / ±`bumped_yaw_tol_rad` instead of the usual one. The ground-truth session
+measured brief pick-ups putting the robot back within ~40 cm; going lost over one, as the first cut
+of this design did, asked for a relocalization the narrow ToF rarely gets, and the robot stayed lost
+for the rest of the session. A nearby search (sat, fell, contradiction) that fails `local_search_keyframes` stops in a
 row keeps only the heading and widens to the whole map, ±`fallback_yaw_tol_rad`. Every search is
 logged with the gate that refused it (`relocalization search:` in `journalctl -u mapd`).
 
@@ -133,7 +144,16 @@ clear, or nowhere near the walls it predicts. Neither stop touches the map.
 
 Stops made while lost go into an **island** — chained by odometry, not attached to the map. Each new
 one is searched for with the island's last `composite_keyframes` stops as one wider scan; when two
-consecutive searches agree, the island is joined to the map and tracking resumes. An island that
+searches of the island agree (within `agree_m`, `agree_rad`), the island is joined to the map and
+tracking resumes. A stop whose search is refused does not erase the candidate before it — only a
+carry does, since the island ends there.
+
+**Pinned means pinned in metres and degrees.** A relocalization is believed when its position is
+pinned to `reloc_max_sigma_xy_m` and its heading either to `reloc_max_sigma_yaw_rad` by the scan or
+by a window already that narrow (`reloc_yaw_prior_rad`): the gyro holds heading through a carry, so
+the carry and fallback searches look within ±8°. The first cut counted a direction as pinned only
+when its spread was under 40 % of the window — which, on a whole-map search at ±30°, refused every
+right answer on the ground-truth session (found 2–8 cm from the truth, "pins 2 of 3 directions"). An island that
 is never recognised stays an island: it is kept, and it is not drawn.
 
 `map.status` says which state it is in, and why (`lost`: `boot`, `carried`, `bumped`, `sat`,
@@ -188,11 +208,15 @@ robot does. That keeps authority where `architecture.md` §6 puts it.
   10 Hz with why it was lost, every event, and the grid (`--res`, one character a cell).
 - `cargo test -p mapd` — the service end to end, minus its two upstream sockets.
 
-**What is not measured yet, and decides the defaults:** real odometry drift (along, across, gyro —
-the `OdometryNoise` defaults are placeholders), the ToF's real capture latency, whether the sensor
-reports radial or axial distance (`range_is_axial`; up to 11 % at the corner zones), and how the
-mapper does on recordings made *for* it — stops of 3–5 s with the head moving, returning to a
-taped mark. The existing recordings were made while walking and rarely stopping.
+**Ground truth.** `pollen-robotics/SLAM_JJ_Salon_with_GT` (private) is a 4-minute session in a
+scanned room with the robot's true pose from a fixed camera, the room's true occupancy, and a
+scorer (`maploc_truth`'s `mtruth evaluate` on a `replay --export`). It settled the sensor model:
+with the true pose, ToF returns land on the room's obstacles 58 % of the time within 5 cm as first
+configured and 81 % with **axial** range, a **60 ms** latency and the sensor **3° further down**
+than the head's kinematics say (`pitch_offset_rad`) — measured on one alpha, so a per-robot number
+once more are measured. Status 0 lands 25 cm off and stays excluded; 9 and 10 are as good as 5.
+The simulator models the same sensor. Odometry noise is still the placeholder `OdometryNoise`;
+stop to stop the real robot measured a few centimetres and ~1°, mostly from turning in place.
 
 ## 8. Not yet
 
