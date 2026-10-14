@@ -125,7 +125,9 @@ carry, that threw the position away and searched a thin map everywhere, and the 
 itself. Nobody carries a duck anywhere in two seconds, so a pick-up that short is a **bump**: the mapper
 keeps tracking — it reports `Bumped`, not lost — and matches the next stop in a window
 ±`bumped_xy_tol_m` / ±`bumped_yaw_tol_rad` instead of the usual one. The ground-truth session
-measured brief pick-ups putting the robot back within ~40 cm; going lost over one, as the first cut
+measured brief pick-ups putting the robot back within ~40 cm — every one held 0.4 s, where every
+real carry was held 1.5–2.2 s and moved it 1.2 m or more, so `brief_pickup_s` is 1 s (at 2 s a
+quick 1.25 m carry passed for a bump and the mapper tracked from the old place for a minute); going lost over one, as the first cut
 of this design did, asked for a relocalization the narrow ToF rarely gets, and the robot stayed lost
 for the rest of the session. A nearby search (sat, fell, contradiction) that fails `local_search_keyframes` stops in a
 row keeps only the heading and widens to the whole map, ±`fallback_yaw_tol_rad`. Until then, a stop

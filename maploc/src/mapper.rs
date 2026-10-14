@@ -183,7 +183,10 @@ impl Default for MapperConfig {
             agree_m: 0.25,
             agree_rad: 4f64.to_radians(),
             carry_yaw_tol_rad: 8f64.to_radians(),
-            brief_pickup_s: 2.0,
+            // Measured on both ground-truth sessions: every bump was held 0.4 s and moved the
+            // robot ≤ 39 cm, every carry 1.5–2.2 s and ≥ 1.2 m. At 2 s a quick 1.25 m carry passed
+            // for a bump and the mapper tracked from the old place, 1.3 m off, for a minute.
+            brief_pickup_s: 1.0,
             bumped_xy_tol_m: 0.5,
             bumped_yaw_tol_rad: 25f64.to_radians(),
             sat_xy_tol_m: 0.15,
