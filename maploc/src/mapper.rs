@@ -20,11 +20,12 @@
 //!
 //! # Losing and finding itself
 //!
-//! Three things break odometry's chain: being picked up and carried (odometry's position is
-//! meaningless while the feet are in the air; the gyro's heading still holds), a fall, and a
-//! power cycle (a fresh odometry frame with an arbitrary heading). After each the mapper is
-//! **lost**, with whatever it still knows as a hint — a heading after a carry, a rough pose after
-//! a fall, the pose it was switched off at after a reboot. Keyframes made while lost go into an
+//! Four things break odometry's chain: being picked up and carried (odometry's position is
+//! meaningless while the feet are in the air; the gyro's heading still holds), a fall, a sit —
+//! a seated robot can be carried without the pick-up detector seeing it — and a power cycle (a
+//! fresh odometry frame with an arbitrary heading). After each the mapper is **lost**, with
+//! whatever it still knows as a hint — a heading after a carry, a rough pose after a fall, the
+//! pose it sat at, the pose it was switched off at after a reboot. Keyframes made while lost go into an
 //! **island**: a piece of graph chained by odometry but not attached to the map. Each new one is
 //! searched for in the map — with the last few stops of the island as one wider scan — and when
 //! two consecutive stops agree, the island is joined to the map and tracking resumes.
@@ -106,6 +107,11 @@ pub struct MapperConfig {
     pub brief_pickup_s: f64,
     pub bumped_xy_tol_m: f64,
     pub bumped_yaw_tol_rad: f64,
+    /// After a sit, how far the pose is trusted. Tight: a robot sat down and stood up is usually
+    /// where it was, and the search is only there to catch the time it was carried while seated —
+    /// which the pick-up detector, watching only while it walks or stands, never sees.
+    pub sat_xy_tol_m: f64,
+    pub sat_yaw_tol_rad: f64,
     /// A nearby search that has failed this many stops gives up its position and searches the
     /// whole map, keeping only the heading — the hint was wrong, or the map is too thin there.
     pub local_search_keyframes: usize,
@@ -162,6 +168,8 @@ impl Default for MapperConfig {
             brief_pickup_s: 2.0,
             bumped_xy_tol_m: 0.5,
             bumped_yaw_tol_rad: 25f64.to_radians(),
+            sat_xy_tol_m: 0.15,
+            sat_yaw_tol_rad: 10f64.to_radians(),
             local_search_keyframes: 4,
             fallback_yaw_tol_rad: 30f64.to_radians(),
             fall_xy_tol_m: 0.5,
@@ -181,6 +189,9 @@ pub enum LostCause {
     Carried,
     /// Picked up for a moment and put back — a stumble, a nudge, the start of a fall.
     Bumped,
+    /// Sat down and stood up again. Probably where it was; possibly carried while seated, which
+    /// nothing else reports.
+    Sat,
     Fell,
     /// Stops stopped agreeing with the map.
     Contradiction,
@@ -341,6 +352,8 @@ pub struct Mapper {
     lost_keyframes: usize,
     last_pose: Option<Pose2>,
     flags: (bool, bool),
+    /// Seated at the last state tick.
+    sitting: bool,
     /// When the current pick-up began, and the map-from-odometry transform from before it.
     pickup_since: Option<u64>,
     broke_from: Option<Pose2>,
@@ -382,6 +395,7 @@ impl Mapper {
             lost_keyframes: 0,
             last_pose: None,
             flags: (false, false),
+            sitting: false,
             pickup_since: None,
             broke_from: None,
             events: Vec::new(),
@@ -530,6 +544,14 @@ impl Mapper {
             self.fell_while_lost();
         }
         self.flags = (act.picked_up, act.fallen);
+        // Standing up ends the chain too. A seated robot can be carried anywhere without the
+        // pick-up detector noticing — it watches only the walking and standing networks — so the
+        // sit itself is the marker, as it was in the first maploc. Unmoved, the next two stops
+        // confirm it where it was.
+        if self.sitting && !act.sitting {
+            self.break_chain(LostCause::Sat);
+        }
+        self.sitting = act.sitting;
 
         let calm = !(act.commanded || act.sitting || act.fallen || act.picked_up || act.unpowered);
         let slow = self
@@ -682,6 +704,11 @@ impl Mapper {
                     map_from_odom,
                     xy_tol: self.cfg.fall_xy_tol_m,
                     yaw_tol: self.cfg.fall_yaw_tol_rad,
+                },
+                LostCause::Sat => Hint::Pose {
+                    map_from_odom,
+                    xy_tol: self.cfg.sat_xy_tol_m,
+                    yaw_tol: self.cfg.sat_yaw_tol_rad,
                 },
                 LostCause::Boot | LostCause::Contradiction | LostCause::Bumped => Hint::None,
             };

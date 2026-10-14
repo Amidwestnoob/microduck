@@ -99,14 +99,15 @@ single-window acceptance path the first maploc had eventually false-positived th
 
 ## 4. Losing and finding itself
 
-Three things break odometry's chain: being **carried** (the pick-up detector's `picked_up`; the
-feet are in the air, but the gyro's heading still holds), a **fall**, and a **reboot** (a new
-odometry frame, heading arbitrary). Each leaves the mapper lost with what it still knows:
+Four things break odometry's chain: being **carried** (the pick-up detector's `picked_up`; the
+feet are in the air, but the gyro's heading still holds), a **fall**, a **sit**, and a **reboot**
+(a new odometry frame, heading arbitrary). Each leaves the mapper lost with what it still knows:
 
 | cause | hint | search |
 |---|---|---|
 | carried | the heading | the whole map, ±`carry_yaw_tol_rad` |
 | bumped — picked up for under `brief_pickup_s` | the pose | ±`bumped_xy_tol_m`, ±`bumped_yaw_tol_rad` |
+| sat — stood up again | the pose it sat at | ±`sat_xy_tol_m`, ±`sat_yaw_tol_rad` |
 | fell | the pose, roughly | ±`fall_xy_tol_m`, ±`fall_yaw_tol_rad` |
 | boot | where it was switched off | there first, then the whole map at every heading |
 | contradiction | the predicted pose | ±1 m |
@@ -115,9 +116,17 @@ odometry frame, heading arbitrary). Each leaves the mapper lost with what it sti
 measured on graphite: "picked up" for 0.36 s, put down, then the limp fall 0.06 s later. Read as a
 carry, that threw the position away and searched a thin map everywhere, and the robot never found
 itself. Nobody carries a duck anywhere in two seconds, so a pick-up that short is searched for
-nearby. A nearby search (bumped, fell, contradiction) that fails `local_search_keyframes` stops in a
+nearby. A nearby search (bumped, sat, fell, contradiction) that fails `local_search_keyframes` stops in a
 row keeps only the heading and widens to the whole map, ±`fallback_yaw_tol_rad`. Every search is
 logged with the gate that refused it (`relocalization search:` in `journalctl -u mapd`).
+
+**A sit is a kidnap marker.** The pick-up detector watches only while the walking and standing
+networks drive, so a robot sat down, carried across the room and stood up again reports nothing —
+the 2026-10-14 field test kept tracking from where it sat, and drew the new place over the old.
+Standing up therefore ends the chain, with the pose it sat at as a tight hint: an unmoved robot is
+confirmed there by the usual two agreeing stops, and a moved one fails that nearby search and
+widens to the whole map like any other. The first maploc did this; the rewrite had dropped it. A
+pick-up while seated, should the detector ever see one, is still a carry.
 
 *Contradiction* is the fourth way: two consecutive stops whose obstacles land on floor the map saw
 clear, or nowhere near the walls it predicts. Neither stop touches the map.
@@ -127,8 +136,8 @@ one is searched for with the island's last `composite_keyframes` stops as one wi
 consecutive searches agree, the island is joined to the map and tracking resumes. An island that
 is never recognised stays an island: it is kept, and it is not drawn.
 
-`map.status` says which state it is in, and why (`lost`: `boot`, `carried`, `bumped`, `fell`,
-`contradiction`).
+`map.status` says which state it is in, and why (`lost`: `boot`, `carried`, `bumped`, `sat`,
+`fell`, `contradiction`).
 
 ## 5. What is kept
 
@@ -170,7 +179,8 @@ robot does. That keeps authority where `architecture.md` §6 puts it.
   odometry that drifts (stride scale, slip, gyro bias and scale), the head sweeping during stops.
   Two laps of a furnished room under harsh drift end 9 cm off where odometry is 27 cm off; carried,
   rebooted-in-place and moved-while-off robots relocalize within three stops (1–4 cm, under 1°,
-  without drift); a 15 cm box is mapped and a table top is not.
+  without drift), one sat down and stood up in place within three, one carried while seated within
+  six; a 15 cm box is mapped and a table top is not.
 - `cargo run -p maploc --release --example replay -- <session>` — a recorded `microduck_vslam`
   session (`state.jsonl` + `tof.jsonl`) through the mapper, with the map written as an image.
 - `cargo test -p mapd` — the service end to end, minus its two upstream sockets.

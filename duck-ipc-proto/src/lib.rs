@@ -5093,8 +5093,9 @@ pub struct MapState {
     pub pose: Option<MapPose>,
     /// Why it does not know where it is: `boot` (it has not recognised anything since it started),
     /// `carried`, `bumped` (picked up for a moment — a stumble, the start of a fall — and looking
-    /// nearby), `fell`, or `contradiction` (what it sees stopped matching the map). Absent while
-    /// it knows.
+    /// nearby), `sat` (stood up, and checking it was not carried while seated), `fell`, or
+    /// `contradiction` (what it sees stopped matching the map). Absent while it knows. A client
+    /// should treat a word it does not know as "lost": the list grows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lost: Option<String>,
     /// A stop is being collected: the robot is standing still and its views are going into the

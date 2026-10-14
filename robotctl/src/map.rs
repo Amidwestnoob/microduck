@@ -97,6 +97,7 @@ fn render_status(s: &proto::MapStatusResult) -> String {
                 "boot" => "it recognises the map after a stop or two somewhere it has been",
                 "carried" => "put down, it looks for itself at the next stops",
                 "bumped" => "knocked or stumbled; it looks for itself nearby at the next stops",
+                "sat" => "it stood up; it may have been carried while seated, so the next stops check where it is",
                 "fell" => "it looks for itself near where it fell",
                 _ => "what it sees stopped matching the map; it is searching",
             }

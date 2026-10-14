@@ -147,6 +147,10 @@ pub enum Step {
     /// Picked up, carried to a pose, put down. Odometry position freezes while carried (its feet
     /// are in the air); the gyro keeps the heading.
     Carry { to: Pose2 },
+    /// Sits for `secs`, then stands. With `to`, it is carried there while seated: the pick-up
+    /// detector does not watch a seated robot, so nothing but the sit says it moved; the legs see
+    /// nothing and the gyro sees the turn.
+    Sit { secs: f64, to: Option<Pose2> },
     /// A stumble: the pick-up detector fires for a third of a second while the robot lurches by
     /// `by` (in its own frame), the way a fall begins on the real robot.
     Stumble { by: Pose2 },
@@ -168,6 +172,7 @@ pub struct Robot {
     next_frame_ns: u64,
     rng: u64,
     head_yaw: f64,
+    seated: bool,
     /// The truth at each state tick, for tests.
     pub truth_log: Vec<(u64, Pose2)>,
 }
@@ -198,6 +203,7 @@ impl Robot {
             next_frame_ns: 1_000_000_000,
             rng: 0x2545_f491_4f6c_dd1d,
             head_yaw: 0.0,
+            seated: false,
             truth_log: Vec::new(),
         }
     }
@@ -255,6 +261,22 @@ impl Robot {
                     for _ in 0..50 {
                         self.tick(Pose2::IDENTITY, true, false, 0.0, sink);
                     }
+                }
+                Step::Sit { secs, to } => {
+                    self.seated = true;
+                    let n = ((secs / (TICK_NS as f64 * 1e-9)) as usize).max(2);
+                    for _ in 0..n / 2 {
+                        self.tick(Pose2::IDENTITY, false, false, 0.0, sink);
+                    }
+                    if let Some(to) = to {
+                        let dyaw = wrap(to.yaw - self.truth.yaw);
+                        self.truth = to;
+                        self.odom.yaw = wrap(self.odom.yaw + dyaw * (1.0 + self.drift.yaw_scale));
+                    }
+                    for _ in n / 2..n {
+                        self.tick(Pose2::IDENTITY, false, false, 0.0, sink);
+                    }
+                    self.seated = false;
                 }
                 Step::Carry { to } => {
                     for _ in 0..100 {
@@ -340,6 +362,7 @@ impl Robot {
             activity: Activity {
                 commanded,
                 picked_up: carried,
+                sitting: self.seated,
                 ..Activity::default()
             },
         }

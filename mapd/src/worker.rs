@@ -78,6 +78,7 @@ pub fn lost_name(c: LostCause) -> &'static str {
         LostCause::Boot => "boot",
         LostCause::Carried => "carried",
         LostCause::Bumped => "bumped",
+        LostCause::Sat => "sat",
         LostCause::Fell => "fell",
         LostCause::Contradiction => "contradiction",
     }

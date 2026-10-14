@@ -451,3 +451,108 @@ fn debug_stumble_without_drift() {
     let (e, a) = err(r.mapper.pose().unwrap(), r.robot.truth);
     eprintln!("no drift: {e:.3} m {a:.1}°");
 }
+
+/// Runs `steps` on from where `r` is, and the events they produced.
+fn continue_run(r: &mut Run, steps: &[Step]) -> usize {
+    let n_before = r.events.len();
+    let Run {
+        mapper,
+        robot,
+        events,
+    } = r;
+    robot.run(steps, &mut |o| {
+        match o {
+            Out::State(s) => mapper.on_state(s),
+            Out::Depth(f) => mapper.on_depth(f),
+        }
+        events.extend(mapper.take_events());
+    });
+    n_before
+}
+
+/// Sitting down and standing up where it was: lost for a moment, since it cannot know it was not
+/// carried, and found again where it sat within a few stops. Judged against the pose the mapper
+/// itself held before the sit — the robot did not move, so the map must put it back there, whatever
+/// error the map carries against the world at that spot. Within a few centimetres rather than
+/// exactly: the spot is the map's origin and the lap's last stop at once, two stops that disagree
+/// by about that much, and the join is matched against both.
+#[test]
+fn a_robot_that_sat_and_stood_where_it_was_resumes_there() {
+    let mut r = mapped_room();
+    let here = r.robot.truth;
+    let before = r.mapper.pose().expect("tracking before the sit");
+    let mut steps = vec![Step::Sit {
+        secs: 6.0,
+        to: None,
+    }];
+    steps.extend(wander([here.x, here.y]));
+    let n_before = continue_run(&mut r, &steps);
+    let after = &r.events[n_before..];
+    assert!(
+        after.iter().any(|e| matches!(
+            e,
+            Event::Lost {
+                cause: maploc::mapper::LostCause::Sat
+            }
+        )),
+        "standing up did not end the chain"
+    );
+    for e in after {
+        if let Event::Searched { scope, outcome, .. } = e {
+            eprintln!("search ({scope}): {outcome}");
+        }
+    }
+    let n = relocalized_after(after).expect("never found itself after sitting");
+    // The first stop after standing is on the spot it sat.
+    let first = after
+        .iter()
+        .find_map(|e| match e {
+            Event::Keyframe { id, .. } => Some(*id as usize),
+            _ => None,
+        })
+        .unwrap();
+    let (e, a) = err(r.mapper.graph().nodes[first], before);
+    eprintln!("relocalized after {n} stops; the spot it sat is {e:.3} m {a:.1}° from where it was");
+    assert!(n <= 3, "an unmoved robot took {n} stops");
+    assert!(e < 0.08 && a < 2.0, "{e:.3} m {a:.1}°");
+}
+
+/// The field test of 2026-10-14: sat down, carried to another part of the room it had mapped,
+/// stood up. The pick-up detector never fired — it does not watch a seated robot — and the first
+/// cut kept tracking from where it sat. The sit is the marker: it must end up at the new place.
+#[test]
+fn a_robot_carried_while_seated_finds_where_it_was_put_down() {
+    let mut r = mapped_room();
+    let to = Pose2::new(2.6, 1.0, 2.2);
+    assert!(
+        r.robot.truth.dist(to) > 1.0,
+        "the carry must go somewhere else"
+    );
+    let mut steps = vec![Step::Sit {
+        secs: 6.0,
+        to: Some(to),
+    }];
+    steps.extend(wander([to.x, to.y]));
+    steps.extend(wander([to.x + 0.3, to.y + 0.3]));
+    let n_before = continue_run(&mut r, &steps);
+    let after = &r.events[n_before..];
+    assert!(
+        after.iter().any(|e| matches!(
+            e,
+            Event::Lost {
+                cause: maploc::mapper::LostCause::Sat
+            }
+        )),
+        "the seated carry went unnoticed"
+    );
+    for e in after {
+        if let Event::Searched { scope, outcome, .. } = e {
+            eprintln!("search ({scope}): {outcome}");
+        }
+    }
+    let n = relocalized_after(after).expect("never found itself after a seated carry");
+    let pose = r.mapper.pose().expect("tracking at the end");
+    let (e, a) = err(pose, r.robot.truth);
+    eprintln!("relocalized after {n} stops, error {e:.3} m {a:.1}°");
+    assert!(e < RELOC_M && a < RELOC_DEG, "{e:.3} m {a:.1}°");
+}
