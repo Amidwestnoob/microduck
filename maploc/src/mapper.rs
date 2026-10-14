@@ -1407,12 +1407,37 @@ impl Mapper {
                 .push(searched(None, "this stop saw no obstacles".into()));
             return false;
         };
-        if let Some(why) = self.wide_refusal(&w.best, w.margin, scan.span_rad, half_yaw) {
+        // The hypotheses this stop offers. A clear answer is one. An answer refused only for
+        // ambiguity is the best place and its rivals within the margin that pass every other
+        // gate: the stop cannot choose, but a later stop that agrees with exactly one of them
+        // can. (Measured on the ground-truth session: right answers refused as ambiguous at two
+        // stops in a row, 30 s of being lost that their agreement would have ended.)
+        let span = scan.span_rad;
+        let refusal = self.wide_refusal(&w.best, w.margin, span, half_yaw);
+        let mut hyps: Vec<MatchResult> = Vec::new();
+        if refusal.is_none() {
+            hyps.push(w.best.clone());
+        } else if self
+            .wide_refusal(&w.best, f64::INFINITY, span, half_yaw)
+            .is_none()
+        {
+            hyps.push(w.best.clone());
+            for (margin, r) in &w.rivals {
+                if *margin < self.cfg.wide_min_margin
+                    && self
+                        .wide_refusal(r, f64::INFINITY, span, half_yaw)
+                        .is_none()
+                {
+                    hyps.push(r.clone());
+                }
+            }
+        }
+        if hyps.is_empty() {
+            let why = refusal.unwrap_or_default();
             self.events
                 .push(searched(Some(w.best.pose), format!("refused — {why}")));
-            // An undecided stop is not evidence against the candidate before it: keep it for the
-            // next stop to confirm. (Measured: a right candidate erased by a margin of 2.9 < 3.0.)
-            // A carry still clears it — the island ends there.
+            // An undecided stop is not evidence against the candidates before it: they stay for
+            // a later stop to confirm. A carry still clears them — the island ends there.
             // A parked hint only holds for the first stop after boot; fall back to the whole map.
             if let (Hint::Parked { .. }, LostCause::Boot) = (hint, cause) {
                 self.loc = Loc::Lost {
@@ -1422,28 +1447,37 @@ impl Mapper {
             }
             return false;
         }
-        // The island → map transform this match implies (island frame = odometry frame).
-        let implied = w.best.pose.compose(odom.inverse());
-        let ref_node = self.nearby(main, w.best.pose, f64::INFINITY, 1, &|_| false)[0];
-        let this = Pending {
-            node,
-            m: w.best,
-            implied,
-            ref_node,
-        };
-        let found = Some(this.m.pose);
-        let margin = w.margin;
+        let these: Vec<Pending> = hyps
+            .into_iter()
+            .map(|m| Pending {
+                node,
+                implied: m.pose.compose(odom.inverse()),
+                ref_node: self.nearby(main, m.pose, f64::INFINITY, 1, &|_| false)[0],
+                m,
+            })
+            .collect();
+        let found = Some(these[0].m.pose);
         // Candidates from another island describe another odometry frame: drop them.
         self.pending_reloc.retain(|p| self.island[p.node] == isl);
-        let agreeing = self
-            .pending_reloc
-            .iter()
-            .rposition(|p| self.agrees(p.implied, implied));
-        if let Some(i) = agreeing {
+        // Which of this stop's hypotheses an earlier stop agrees with.
+        let mut agreeing: Vec<(usize, usize)> = Vec::new();
+        for (h, this) in these.iter().enumerate() {
+            for (i, p) in self.pending_reloc.iter().enumerate() {
+                if p.node != node && self.agrees(p.implied, this.implied) {
+                    agreeing.push((h, i));
+                }
+            }
+        }
+        let mut hs: Vec<usize> = agreeing.iter().map(|&(h, _)| h).collect();
+        hs.dedup();
+        if hs.len() == 1 {
+            let (h, i) = *agreeing.iter().rev().find(|&&(h, _)| h == hs[0]).unwrap();
             let prev = self.pending_reloc.remove(i);
+            let this = these.into_iter().nth(h).unwrap();
+            let implied = this.implied;
             self.pending_reloc.clear();
             self.events.push(searched(
-                found,
+                Some(this.m.pose),
                 format!(
                     "agrees with the stop {} back — joining the map",
                     node.saturating_sub(prev.node)
@@ -1451,21 +1485,28 @@ impl Mapper {
             ));
             self.join(isl, implied, &[prev, this]);
         } else {
-            let outcome = match self.pending_reloc.last() {
-                Some(prev) => {
-                    let d = prev.implied.between(implied);
-                    format!(
-                        "candidate (margin {margin:.1}), {:.2} m {:.0}° from the stop before's — a later stop must agree",
-                        d.x.hypot(d.y),
-                        d.yaw.to_degrees()
-                    )
-                }
-                None => format!("candidate (margin {margin:.1}) — a later stop must agree"),
+            let k = these.len();
+            let margin = w.margin;
+            let outcome = if hs.len() > 1 {
+                format!(
+                    "{} of its {k} places agree with earlier stops — still ambiguous",
+                    hs.len()
+                )
+            } else if k > 1 {
+                format!(
+                    "ambiguous between {k} places (margin {margin:.1}) — a later stop must pick one"
+                )
+            } else {
+                format!("candidate (margin {margin:.1}) — a later stop must agree")
             };
             self.events.push(searched(found, outcome));
-            self.pending_reloc.push(this);
-            if self.pending_reloc.len() > self.cfg.reloc_candidates {
-                self.pending_reloc.remove(0);
+            self.pending_reloc.extend(these);
+            // Keep the hypotheses of the last few stops.
+            let mut nodes: Vec<usize> = self.pending_reloc.iter().map(|p| p.node).collect();
+            nodes.dedup();
+            if nodes.len() > self.cfg.reloc_candidates {
+                let oldest = nodes[nodes.len() - self.cfg.reloc_candidates];
+                self.pending_reloc.retain(|p| p.node >= oldest);
             }
         }
         true

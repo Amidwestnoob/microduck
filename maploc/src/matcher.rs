@@ -334,6 +334,9 @@ pub struct WideResult {
     /// [`WIDE_SEPARATION_M`] or [`WIDE_SEPARATION_RAD`] away — as a log ratio (temperature
     /// applied). Infinite when nothing else came close enough to be refined.
     pub margin: f64,
+    /// The next-best distinct places, each refined like the best, with its margin below the
+    /// best: what an ambiguous stop could also be. A later stop decides between them.
+    pub rivals: Vec<(f64, MatchResult)>,
 }
 
 pub const WIDE_SEPARATION_M: f64 = 0.25;
@@ -425,22 +428,42 @@ pub fn match_wide(
             || wrap(m.pose.yaw - best.pose.yaw).abs() > WIDE_SEPARATION_RAD
     });
     let margin = runner.map_or(f64::INFINITY, |(t, _)| (best_total - t) / cfg.temperature);
-    // The covariance of the answer comes from a local window around it, not from the narrow
+    // The covariance of an answer comes from a local window around it, not from the narrow
     // refinement box — a well-separated peak can still be flat along a wall.
-    let local = match_local(
-        field,
-        kf,
-        Window {
-            center: best.pose,
-            half_xy: 0.2,
-            half_yaw: 4f64.to_radians(),
-            step_yaw: 1f64.to_radians(),
-        },
-        cfg,
-    )?;
+    let around = |p: Pose2| {
+        match_local(
+            field,
+            kf,
+            Window {
+                center: p,
+                half_xy: 0.2,
+                half_yaw: 4f64.to_radians(),
+                step_yaw: 1f64.to_radians(),
+            },
+            cfg,
+        )
+    };
+    let local = around(best.pose)?;
+    let distinct = |a: Pose2, b: Pose2| {
+        a.dist(b) > WIDE_SEPARATION_M || wrap(a.yaw - b.yaw).abs() > WIDE_SEPARATION_RAD
+    };
+    let mut rivals: Vec<(f64, MatchResult)> = Vec::new();
+    let mut taken = vec![best.pose];
+    for (t, m) in refined.iter().skip(1) {
+        if rivals.len() >= 2 {
+            break;
+        }
+        if taken.iter().all(|&q| distinct(q, m.pose))
+            && let Some(r) = around(m.pose)
+        {
+            taken.push(m.pose);
+            rivals.push(((best_total - t) / cfg.temperature, r));
+        }
+    }
     Some(WideResult {
         best: local,
         margin,
+        rivals,
     })
 }
 

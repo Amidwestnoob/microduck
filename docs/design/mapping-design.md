@@ -151,6 +151,13 @@ searches of the island agree (within `agree_m`, `agree_rad`), the island is join
 tracking resumes. A stop whose search is refused does not erase the candidate before it — only a
 carry does, since the island ends there.
 
+**An ambiguous stop offers its rivals.** A search refused only because a place ≥ 25 cm away fits
+nearly as well (`wide_min_margin`) keeps the best and its rivals within the margin that pass every
+other gate, as hypotheses. A later stop joins the map when exactly one of its hypotheses agrees
+with an earlier stop's; two consistent hypotheses — both stops seeing the same wall, say — keep it
+waiting. On the ground-truth session this turned two "ambiguous" refusals of the right answer
+into a join 23 s sooner.
+
 **Pinned means pinned in metres and degrees.** A relocalization is believed when its position is
 pinned to `reloc_max_sigma_xy_m` and its heading either to `reloc_max_sigma_yaw_rad` by the scan or
 by a window already that narrow (`reloc_yaw_prior_rad`): the gyro holds heading through a carry, so
