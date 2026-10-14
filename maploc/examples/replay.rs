@@ -7,7 +7,15 @@
 //!
 //! ```text
 //! cargo run -p maploc --release --example replay -- <session-dir> [--out map.ppm] [--latency-ms N] [--axial] [--quiet]
+//!     [--export run.json] [--res 0.025]
 //! ```
+//!
+//! `--export` writes what the mapper decided, for scoring against ground truth elsewhere: every
+//! stop with its odometry pose, the pose it was placed at live and its pose in the final optimized
+//! map; the tracked pose over time (≤ 10 Hz) and why it was lost when it was; every event; and the
+//! grid at `--res`. Poses are `[x, y, yaw]` — odometry ones in the odometry frame, the rest in the
+//! map's — and the grid's `rows[0]` is its lowest y, one character a cell: `#` occupied, `.` seen
+//! clear, `?` unknown.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -15,8 +23,9 @@ use std::path::PathBuf;
 use duck_ipc_proto::{RobotState, TofFrame};
 use maploc::grid::Cell;
 use maploc::input::{DepthFrame, StateSample};
-use maploc::mapper::{Event, Mapper, MapperConfig};
-use serde::Deserialize;
+use maploc::mapper::{Event, LostCause, Mapper, MapperConfig};
+use maploc::se2::Pose2;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 struct Line<T> {
@@ -28,12 +37,88 @@ enum Ev {
     Depth(DepthFrame),
 }
 
+#[derive(Serialize)]
+struct Export {
+    version: u32,
+    keyframes: Vec<KeyframeOut>,
+    poses: Vec<PoseOut>,
+    events: Vec<EventOut>,
+    grid: Option<GridOut>,
+}
+
+#[derive(Serialize)]
+struct KeyframeOut {
+    id: u32,
+    t_ns: u64,
+    odom: [f64; 3],
+    live: Option<[f64; 3]>,
+    #[serde(rename = "final")]
+    final_: Option<[f64; 3]>,
+    in_map: bool,
+}
+
+#[derive(Serialize)]
+struct PoseOut {
+    t_ns: u64,
+    pose: Option<[f64; 3]>,
+    lost: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct EventOut {
+    t_ns: u64,
+    kind: &'static str,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct GridOut {
+    res: f64,
+    origin: [f64; 2],
+    w: usize,
+    h: usize,
+    rows: Vec<String>,
+}
+
+fn xyt(p: Pose2) -> [f64; 3] {
+    [p.x, p.y, p.yaw]
+}
+
+/// The words `mapd` puts in `map.status`.
+fn lost_name(c: LostCause) -> &'static str {
+    match c {
+        LostCause::Boot => "boot",
+        LostCause::Carried => "carried",
+        LostCause::Bumped => "bumped",
+        LostCause::Sat => "sat",
+        LostCause::Fell => "fell",
+        LostCause::Contradiction => "contradiction",
+    }
+}
+
+fn kind(e: &Event) -> &'static str {
+    match e {
+        Event::Keyframe { .. } => "keyframe",
+        Event::Discarded { .. } => "discarded",
+        Event::LoopClosed { .. } => "loop_closed",
+        Event::Lost { .. } => "lost",
+        Event::Relocalized { .. } => "relocalized",
+        Event::EdgeRejected { .. } => "edge_rejected",
+        Event::Searched { .. } => "searched",
+    }
+}
+
+/// Decimation of the exported pose track: 10 Hz.
+const POSE_EVERY_NS: u64 = 100_000_000;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().ok_or(
-        "usage: replay <session-dir> [--out map.ppm] [--latency-ms N] [--axial] [--quiet]",
+        "usage: replay <session-dir> [--out map.ppm] [--latency-ms N] [--axial] [--quiet] [--export run.json] [--res 0.025]",
     )?);
     let mut out = PathBuf::from("map.ppm");
+    let mut export_to: Option<PathBuf> = None;
+    let mut res = 0.025;
     let mut cfg = MapperConfig::default();
     let mut quiet = false;
     while let Some(a) = args.next() {
@@ -44,6 +129,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--axial" => cfg.project.range_is_axial = true,
             "--quiet" => quiet = true,
+            "--export" => export_to = Some(args.next().ok_or("--export needs a path")?.into()),
+            "--res" => res = args.next().ok_or("--res needs a number")?.parse()?,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -83,12 +170,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mut reloc,
         mut discarded,
     ) = (0, 0, 0, 0, 0, 0, 0, 0);
+    let mut export = Export {
+        version: 1,
+        keyframes: Vec::new(),
+        poses: Vec::new(),
+        events: Vec::new(),
+        grid: None,
+    };
+    let mut t_state = 0u64;
+    let mut next_pose_ns = 0u64;
     for (_, e) in events {
         match e {
-            Ev::State(s) => m.on_state(*s),
+            Ev::State(s) => {
+                t_state = s.t_ns;
+                m.on_state(*s);
+                if t_state >= next_pose_ns {
+                    next_pose_ns = t_state + POSE_EVERY_NS;
+                    export.poses.push(PoseOut {
+                        t_ns: t_state,
+                        pose: m.pose().map(xyt),
+                        lost: m.lost().map(lost_name),
+                    });
+                }
+            }
             Ev::Depth(f) => m.on_depth(f),
         }
         for ev in m.take_events() {
+            export.events.push(EventOut {
+                t_ns: t_state,
+                kind: kind(&ev),
+                text: format!("{ev:?}"),
+            });
+            if let Event::Keyframe { id, .. } = ev {
+                export.keyframes.push(KeyframeOut {
+                    id,
+                    t_ns: t_state,
+                    odom: xyt(m.keyframes()[id as usize].odom),
+                    live: m.pose().map(xyt),
+                    final_: None,
+                    in_map: false,
+                });
+            }
             match &ev {
                 Event::Keyframe { matched: mt, .. } => {
                     kfs += 1;
@@ -125,7 +247,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let Some(g) = m.grid(0.025) else {
+    let finals: std::collections::HashMap<u32, Pose2> =
+        m.map_keyframes().map(|(p, k)| (k.id, p)).collect();
+    for k in &mut export.keyframes {
+        k.final_ = finals.get(&k.id).copied().map(xyt);
+        k.in_map = k.final_.is_some();
+    }
+    let grid = m.grid(res);
+    if let Some(path) = &export_to {
+        export.grid = grid.as_ref().map(|g| GridOut {
+            res: g.res,
+            origin: g.origin,
+            w: g.w,
+            h: g.h,
+            rows: g
+                .cells
+                .chunks(g.w)
+                .map(|row| {
+                    row.iter()
+                        .map(|c| match c {
+                            Cell::Occupied => '#',
+                            Cell::Free => '.',
+                            Cell::Unknown => '?',
+                        })
+                        .collect()
+                })
+                .collect(),
+        });
+        std::fs::write(path, serde_json::to_vec(&export)?)?;
+        println!(
+            "exported {} stops, {} poses, {} events to {}",
+            export.keyframes.len(),
+            export.poses.len(),
+            export.events.len(),
+            path.display()
+        );
+    }
+
+    let Some(g) = grid else {
         println!("no map");
         return Ok(());
     };

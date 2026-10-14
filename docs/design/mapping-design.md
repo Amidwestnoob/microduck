@@ -183,6 +183,9 @@ robot does. That keeps authority where `architecture.md` §6 puts it.
   six; a 15 cm box is mapped and a table top is not.
 - `cargo run -p maploc --release --example replay -- <session>` — a recorded `microduck_vslam`
   session (`state.jsonl` + `tof.jsonl`) through the mapper, with the map written as an image.
+  `--export run.json` also writes what it decided, for scoring against ground truth outside this
+  repository: each stop's odometry pose, live pose and final optimized pose, the tracked pose at
+  10 Hz with why it was lost, every event, and the grid (`--res`, one character a cell).
 - `cargo test -p mapd` — the service end to end, minus its two upstream sockets.
 
 **What is not measured yet, and decides the defaults:** real odometry drift (along, across, gyro —
