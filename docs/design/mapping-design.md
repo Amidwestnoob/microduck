@@ -128,7 +128,10 @@ keeps tracking — it reports `Bumped`, not lost — and matches the next stop i
 measured brief pick-ups putting the robot back within ~40 cm; going lost over one, as the first cut
 of this design did, asked for a relocalization the narrow ToF rarely gets, and the robot stayed lost
 for the rest of the session. A nearby search (sat, fell, contradiction) that fails `local_search_keyframes` stops in a
-row keeps only the heading and widens to the whole map, ±`fallback_yaw_tol_rad`. Every search is
+row keeps only the heading and widens to the whole map, ±`fallback_yaw_tol_rad`. Until then, a stop
+whose nearby search is refused is searched across the whole map at the hint's heading too, on the
+same stop: a robot sat down and carried away otherwise spent its first stops on a hint that was
+wrong. Every search is
 logged with the gate that refused it (`relocalization search:` in `journalctl -u mapd`).
 
 **A sit is a kidnap marker.** The pick-up detector watches only while the walking and standing
@@ -207,6 +210,13 @@ robot does. That keeps authority where `architecture.md` §6 puts it.
   repository: each stop's odometry pose, live pose and final optimized pose, the tracked pose at
   10 Hz with why it was lost, every event, and the grid (`--res`, one character a cell).
 - `cargo test -p mapd` — the service end to end, minus its two upstream sockets.
+
+**Kidnaps from one recording.** `maploc_truth/scripts/kidnap.py` cuts the ground-truth session at
+t1 and resumes it at t2, odometry's position held across the gap (heading carried on, as the gyro
+would) and the gap flagged as a carry or a sit — a relocalization test whose answer the camera
+knows, against a map built only from before t1. Of 12 such kidnaps, 8 are solvable (≥ 60 % of
+what the robot sees after t2 was mapped before t1); the mapper finds itself in 6 of those, 3–7 cm
+from the truth, a median 31 s after standing, and never in a wrong place.
 
 **Ground truth.** `pollen-robotics/SLAM_JJ_Salon_with_GT` (private) is a 4-minute session in a
 scanned room with the robot's true pose from a fixed camera, the room's true occupancy, and a

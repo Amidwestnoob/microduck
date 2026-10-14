@@ -1291,19 +1291,46 @@ impl Mapper {
         if all.is_empty() {
             return;
         }
-        // A nearby search that keeps failing was given a wrong hint, or the map is thin there:
-        // keep the heading, drop the position.
-        let hint = match hint {
-            Hint::Pose { map_from_odom, .. }
-                if self.lost_keyframes > self.cfg.local_search_keyframes =>
-            {
-                Hint::Heading {
+        // A nearby hint is tried first, and when that stop refuses it, the whole map at the
+        // hint's heading on the same stop: a robot sat down and carried across the room lost
+        // two stops to nearby searches before (measured on the ground-truth kidnaps), and the
+        // island's next pick-up ended it before the wide search confirmed. After
+        // `local_search_keyframes` stops the nearby try is dropped.
+        let hints = match hint {
+            Hint::Pose { map_from_odom, .. } => {
+                let wide = Hint::Heading {
                     odom_to_map_yaw: map_from_odom.yaw,
                     tol: self.cfg.fallback_yaw_tol_rad,
+                };
+                if self.lost_keyframes > self.cfg.local_search_keyframes {
+                    vec![wide]
+                } else {
+                    vec![hint, wide]
                 }
             }
-            h => h,
+            h => vec![h],
         };
+        for h in hints {
+            if self.search_once(node, isl, cause, h, &scan, odom, main, &all) {
+                break;
+            }
+        }
+    }
+
+    /// One search of the map for `node`'s scan under one hint. True when it produced a candidate
+    /// (or joined the map), false when it found nothing or a gate refused it.
+    #[allow(clippy::too_many_arguments)]
+    fn search_once(
+        &mut self,
+        node: usize,
+        isl: u32,
+        cause: LostCause,
+        hint: Hint,
+        scan: &Keyframe,
+        odom: Pose2,
+        main: u32,
+        all: &[usize],
+    ) -> bool {
         let scope = match hint {
             Hint::Pose { .. } => "nearby",
             Hint::Parked { .. } if self.lost_keyframes == 1 => "parked",
@@ -1338,21 +1365,21 @@ impl Mapper {
                 odom_to_map_yaw,
                 tol,
             } => {
-                let (c, half) = self.map_extent(&all);
+                let (c, half) = self.map_extent(all);
                 (
                     Pose2::new(c[0], c[1], wrap(odom.yaw + odom_to_map_yaw)),
                     half,
                     tol,
-                    all.clone(),
+                    all.to_vec(),
                 )
             }
             Hint::Parked { .. } | Hint::None => {
-                let (c, half) = self.map_extent(&all);
+                let (c, half) = self.map_extent(all);
                 (
                     Pose2::new(c[0], c[1], 0.0),
                     half,
                     std::f64::consts::PI,
-                    all.clone(),
+                    all.to_vec(),
                 )
             }
         };
@@ -1367,7 +1394,7 @@ impl Mapper {
         let Some(field) = self.field_of(&nodes) else {
             self.events
                 .push(searched(None, "no mapped obstacles near the hint".into()));
-            return;
+            return false;
         };
         let win = Window {
             center,
@@ -1375,10 +1402,10 @@ impl Mapper {
             half_yaw,
             step_yaw: 2f64.to_radians(),
         };
-        let Some(w) = match_wide(&field, &scan, win, &self.cfg.matcher) else {
+        let Some(w) = match_wide(&field, scan, win, &self.cfg.matcher) else {
             self.events
                 .push(searched(None, "this stop saw no obstacles".into()));
-            return;
+            return false;
         };
         if let Some(why) = self.wide_refusal(&w.best, w.margin, scan.span_rad, half_yaw) {
             self.events
@@ -1393,7 +1420,7 @@ impl Mapper {
                     hint: Hint::None,
                 };
             }
-            return;
+            return false;
         }
         // The island → map transform this match implies (island frame = odometry frame).
         let implied = w.best.pose.compose(odom.inverse());
@@ -1441,6 +1468,7 @@ impl Mapper {
                 self.pending_reloc.remove(0);
             }
         }
+        true
     }
 
     fn map_extent(&self, nodes: &[usize]) -> ([f64; 2], f64) {
