@@ -220,6 +220,13 @@ stop to stop the real robot measured a few centimetres and ~1°, mostly from tur
 
 ## 8. Not yet
 
+- **Floor under an overhang is not walkable.** The ToF's low rows pass under a bench or a sofa on
+  legs and see clear floor that the duck cannot reach; the ground-truth session counts 58 % of the
+  room's obstacle cells as "free" in the map, almost all of them under furniture. Cutting a low
+  row's free run at the nearest hit in its column fixes the map (obstacles called free 58 → 46 %,
+  recall 67 → 76 %) but takes "saw through here" evidence from the matcher (a bump's heading 1.4°
+  → 4.9° in the simulator). It belongs in the drawn grid, not in the keyframes the matcher reads.
+
 - **A deliberate head sweep** at each stop, asked of `robotd` as a behaviour rather than commanded
   by `mapd` — wider stops are better matches and faster relocalization.
 - **`tofd` configured for range**: integration time, closest-target order and sharpener are left at

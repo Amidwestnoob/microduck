@@ -139,6 +139,8 @@ pub struct MapperConfig {
     /// believed: odometry between two stops is good to a few centimetres and a degree or two
     /// (measured), and a narrow scan that fits 40 cm away is fitting the wrong wall.
     pub track_max_correction_m: f64,
+    /// Relocalization candidates an island keeps for a later stop to agree with.
+    pub reloc_candidates: usize,
     pub track_max_correction_rad: f64,
 }
 
@@ -197,6 +199,7 @@ impl Default for MapperConfig {
             reloc_max_sigma_yaw_rad: 3f64.to_radians(),
             reloc_yaw_prior_rad: 10f64.to_radians(),
             track_max_correction_m: 0.10,
+            reloc_candidates: 3,
             track_max_correction_rad: 3f64.to_radians(),
         }
     }
@@ -375,7 +378,9 @@ pub struct Mapper {
     /// A stop that contradicted the map, held out until the next one decides.
     suspect: Option<Keyframe>,
     pending_loop: Option<Pending>,
-    pending_reloc: Option<Pending>,
+    /// The island's latest relocalization candidates, newest last — a few, so one wrong
+    /// candidate between two right ones does not stop them agreeing.
+    pending_reloc: Vec<Pending>,
     lost_keyframes: usize,
     last_pose: Option<Pose2>,
     flags: (bool, bool),
@@ -420,7 +425,7 @@ impl Mapper {
             contradictions: 0,
             suspect: None,
             pending_loop: None,
-            pending_reloc: None,
+            pending_reloc: Vec::new(),
             lost_keyframes: 0,
             last_pose: None,
             flags: (false, false),
@@ -720,7 +725,7 @@ impl Mapper {
         self.chain = None;
         self.suspect = None;
         self.pending_loop = None;
-        self.pending_reloc = None;
+        self.pending_reloc.clear();
         if let Loc::Tracking { map_from_odom } = self.loc {
             self.last_pose = self.pose().or(self.last_pose);
             self.broke_from = Some(map_from_odom);
@@ -1401,28 +1406,39 @@ impl Mapper {
         };
         let found = Some(this.m.pose);
         let margin = w.margin;
-        match self.pending_reloc.take() {
-            Some(prev) if self.island[prev.node] == isl && self.agrees(prev.implied, implied) => {
-                self.events.push(searched(
-                    found,
-                    "agrees with the stop before — joining the map".into(),
-                ));
-                self.join(isl, implied, &[prev, this]);
-            }
-            prev => {
-                let outcome = match prev {
-                    Some(prev) if self.island[prev.node] == isl => {
-                        let d = prev.implied.between(implied);
-                        format!(
-                            "candidate (margin {margin:.1}), {:.2} m {:.0}° from the stop before's — the next must agree",
-                            d.x.hypot(d.y),
-                            d.yaw.to_degrees()
-                        )
-                    }
-                    _ => format!("candidate (margin {margin:.1}) — the next stop must agree"),
-                };
-                self.events.push(searched(found, outcome));
-                self.pending_reloc = Some(this);
+        // Candidates from another island describe another odometry frame: drop them.
+        self.pending_reloc.retain(|p| self.island[p.node] == isl);
+        let agreeing = self
+            .pending_reloc
+            .iter()
+            .rposition(|p| self.agrees(p.implied, implied));
+        if let Some(i) = agreeing {
+            let prev = self.pending_reloc.remove(i);
+            self.pending_reloc.clear();
+            self.events.push(searched(
+                found,
+                format!(
+                    "agrees with the stop {} back — joining the map",
+                    node.saturating_sub(prev.node)
+                ),
+            ));
+            self.join(isl, implied, &[prev, this]);
+        } else {
+            let outcome = match self.pending_reloc.last() {
+                Some(prev) => {
+                    let d = prev.implied.between(implied);
+                    format!(
+                        "candidate (margin {margin:.1}), {:.2} m {:.0}° from the stop before's — a later stop must agree",
+                        d.x.hypot(d.y),
+                        d.yaw.to_degrees()
+                    )
+                }
+                None => format!("candidate (margin {margin:.1}) — a later stop must agree"),
+            };
+            self.events.push(searched(found, outcome));
+            self.pending_reloc.push(this);
+            if self.pending_reloc.len() > self.cfg.reloc_candidates {
+                self.pending_reloc.remove(0);
             }
         }
     }
