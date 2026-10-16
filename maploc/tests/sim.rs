@@ -527,3 +527,36 @@ fn a_robot_carried_while_seated_finds_where_it_was_put_down() {
     eprintln!("relocalized after {n} stops, error {e:.3} m {a:.1}°");
     assert!(e < RELOC_M && a < RELOC_DEG, "{e:.3} m {a:.1}°");
 }
+
+#[test]
+fn lapping_one_room_the_map_stops_growing() {
+    // Eight laps of the same room: the later ones are stops at places the map already has twice.
+    // They must not each become a keyframe, and the robot must still know where it is.
+    let mut steps = first_stop();
+    for _ in 0..8 {
+        steps.extend(lap());
+    }
+    let r = run(Mapper::new(MapperConfig::default()), start(), &steps);
+    let kfs = r
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Keyframe { .. }))
+        .count();
+    let covered = r
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Covered { .. }))
+        .count();
+    let (e, a) = err(r.mapper.pose().expect("tracking at the end"), r.robot.truth);
+    let (e_odo, _) = err(r.robot.odom, r.robot.truth);
+    eprintln!(
+        "{} stops: {kfs} keyframes, {covered} covered; error {e:.3} m {a:.1}°, odometry {e_odo:.3} m",
+        kfs + covered
+    );
+    assert!(
+        covered * 3 > kfs + covered,
+        "only {covered} of {} stops covered",
+        kfs + covered
+    );
+    assert!(e < 0.10 && a < 3.0, "{e:.3} m {a:.1}°");
+}

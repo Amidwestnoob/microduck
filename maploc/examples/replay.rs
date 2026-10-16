@@ -132,6 +132,7 @@ fn kind(e: &Event) -> &'static str {
     match e {
         Event::Keyframe { .. } => "keyframe",
         Event::Discarded { .. } => "discarded",
+        Event::Covered { .. } => "covered",
         Event::LoopClosed { .. } => "loop_closed",
         Event::Lost { .. } => "lost",
         Event::Bumped { .. } => "bumped",
@@ -231,7 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mut lost,
         mut reloc,
         mut discarded,
-    ) = (0, 0, 0, 0, 0, 0, 0, 0);
+        mut covered,
+    ) = (0, 0, 0, 0, 0, 0, 0, 0, 0);
     let mut export = Export {
         version: 1,
         keyframes: Vec::new(),
@@ -305,6 +307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Lost { .. } => lost += 1,
                 Event::Relocalized { .. } => reloc += 1,
                 Event::Discarded { .. } => discarded += 1,
+                Event::Covered { .. } => covered += 1,
                 Event::Searched { .. } | Event::Bumped { .. } => {}
             }
             if !quiet {
@@ -314,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let elapsed = started.elapsed();
     println!(
-        "keyframes {kfs} (matched {matched}, fully pinned {full}), discarded stops {discarded}, loops {loops}, rejected edges {rejected}, lost {lost}, relocalized {reloc}"
+        "keyframes {kfs} (matched {matched}, fully pinned {full}), covered stops {covered}, discarded stops {discarded}, loops {loops}, rejected edges {rejected}, lost {lost}, relocalized {reloc}"
     );
     println!("mapper time {:.2} s", elapsed.as_secs_f64());
     if let Some(p) = m.pose() {

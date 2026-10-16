@@ -134,13 +134,15 @@ impl Worker {
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(Input::State(s)) => {
                     let t_ns = s.t_ns;
+                    let t0 = Instant::now();
                     self.mapper.on_state(*s);
-                    self.after_input(t_ns);
+                    self.after_input(t_ns, t0.elapsed());
                 }
                 Ok(Input::Depth(f)) => {
                     let t_ns = f.t_ns;
+                    let t0 = Instant::now();
                     self.mapper.on_depth(f);
-                    self.after_input(t_ns);
+                    self.after_input(t_ns, t0.elapsed());
                 }
                 Ok(Input::Grid(res, reply)) => {
                     let _ = reply.send(self.grid(res));
@@ -177,9 +179,23 @@ impl Worker {
         }
     }
 
-    fn after_input(&mut self, t_ns: u64) {
+    fn after_input(&mut self, t_ns: u64, took: Duration) {
         let events = self.mapper.take_events();
         let changed = !events.is_empty();
+        // What a stop costs, and how big the map has grown: the number to watch if the map ever
+        // makes the robot slow to know where it is.
+        if events
+            .iter()
+            .any(|e| matches!(e, Event::Keyframe { .. } | Event::Covered { .. }))
+        {
+            let (in_map, islands) = self.mapper.counts();
+            tracing::info!(
+                ms = format!("{:.1}", took.as_secs_f64() * 1e3),
+                keyframes = in_map,
+                island_keyframes = islands,
+                "stop processed"
+            );
+        }
         for e in events {
             log_event(&e);
             match e {
@@ -238,6 +254,7 @@ impl Worker {
         if !self.dirty {
             return;
         }
+        let t0 = Instant::now();
         let session = self.mapper.session();
         match store::save(&self.path, &session) {
             Ok(()) => {
@@ -253,7 +270,13 @@ impl Worker {
                 if let Ok(mut s) = self.shared.lock() {
                     s.status.saved_at = Some(secs);
                 }
-                tracing::info!(why, keyframes = session.keyframes.len(), path = %self.path.display(), "map saved");
+                tracing::info!(
+                    why,
+                    keyframes = session.keyframes.len(),
+                    ms = format!("{:.0}", t0.elapsed().as_secs_f64() * 1e3),
+                    path = %self.path.display(),
+                    "map saved"
+                );
             }
             Err(e) => {
                 // Keep it dirty: the next autosave tries again.
@@ -321,6 +344,24 @@ fn log_event(e: &Event) {
             ),
         },
         Event::Discarded { frames } => tracing::debug!(frames, "stop too short to keep"),
+        Event::Covered {
+            by,
+            frames,
+            matched: Some(m),
+        } if m.accepted => tracing::info!(
+            by,
+            frames,
+            dx = format!("{:.3}", m.correction.x),
+            dy = format!("{:.3}", m.correction.y),
+            dyaw_deg = format!("{:.1}", m.correction.yaw.to_degrees()),
+            hit = format!("{:.2}", m.hit_frac),
+            "stop covered by keyframes already in the map: pose kept, scan not"
+        ),
+        Event::Covered { by, frames, .. } => tracing::info!(
+            by,
+            frames,
+            "stop covered by keyframes already in the map, match not believed: dropped"
+        ),
         Event::LoopClosed {
             from,
             to,

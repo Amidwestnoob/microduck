@@ -17,6 +17,14 @@
 //!    Accepted only when two consecutive stops agree on the same correction: every single-window
 //!    acceptance path in the first maploc eventually false-positived through the keyhole.
 //! 4. **Optimized**, and the map-from-odometry transform updated from the keyframe's new pose.
+//!    Only the stop's neighbourhood is re-solved — its last few keyframes, everything older held
+//!    still — so a stop costs the same whatever the size of the map. The whole graph is re-solved
+//!    when an edge spans it (a loop closure, a relocalization) and every so many stops.
+//!
+//! A stop at a place the map already has twice — keyframes that stood there facing the same way —
+//! is **covered**: its scan is not kept. Matched, its pose stays in the graph as a node without a
+//! scan; unmatched, it is dropped and odometry carries on past it. The map then grows with the room
+//! the robot has seen, not with the time it has spent in it.
 //!
 //! # Losing and finding itself
 //!
@@ -38,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 use crate::field::{Field, FieldConfig};
-use crate::graph::{Edge, EdgeKind, Graph, GraphConfig, OdometryNoise, info_in_frame};
+use crate::graph::{Edge, EdgeKind, Graph, GraphConfig, Mat3, OdometryNoise, info_in_frame};
 use crate::grid::OccupancyGrid;
 use crate::input::{Coverage, DepthFrame, History, StateSample};
 use crate::keyframe::{Keyframe, KeyframeBuilder, KeyframeConfig};
@@ -142,6 +150,19 @@ pub struct MapperConfig {
     /// Relocalization candidates an island keeps for a later stop to agree with.
     pub reloc_candidates: usize,
     pub track_max_correction_rad: f64,
+    /// A stop re-solves this many of the newest keyframes, itself included; older ones are held.
+    pub local_optimize_keyframes: usize,
+    /// ...and the whole graph is re-solved every this many stops, whatever happened.
+    pub full_optimize_every: usize,
+    /// A stop is covered when keyframes of the map stood within this of where it is, facing within
+    /// this, and saw about as much — and, for its pose to be kept, the match is this clean.
+    pub cover_xy_m: f64,
+    pub cover_yaw_rad: f64,
+    pub cover_min_hit_frac: f64,
+    pub cover_max_conflict: f64,
+    /// ...and this many keyframes already cover it: the map keeps a second view of every place,
+    /// so a stop is still matched against more than one scan of what it sees.
+    pub cover_min_keyframes: usize,
 }
 
 impl Default for MapperConfig {
@@ -204,6 +225,17 @@ impl Default for MapperConfig {
             track_max_correction_m: 0.10,
             reloc_candidates: 3,
             track_max_correction_rad: 3f64.to_radians(),
+            local_optimize_keyframes: 10,
+            full_optimize_every: 50,
+            cover_xy_m: 0.25,
+            cover_yaw_rad: 20f64.to_radians(),
+            // Stricter than a believed match (0.5, 0.15): a stop that sees something the map
+            // does not explain — a moved chair, a door now open — is kept, and the map learns it.
+            cover_min_hit_frac: 0.7,
+            cover_max_conflict: 0.05,
+            // One was not enough (measured in the synthetic room): skipping the second stop at the
+            // start left the next stop one scan to match against, 12 cm off, and it was refused.
+            cover_min_keyframes: 2,
         }
     }
 }
@@ -267,6 +299,14 @@ pub enum Event {
     /// A stop that was too short to keep.
     Discarded {
         frames: u32,
+    },
+    /// A stop at a place the map already covers: its scan is not kept. `by` is the nearest keyframe
+    /// that covers it. With a believed match the stop is still a node of the graph, without a scan;
+    /// without one it is dropped.
+    Covered {
+        by: usize,
+        frames: u32,
+        matched: Option<MatchSummary>,
     },
     LoopClosed {
         from: usize,
@@ -367,6 +407,8 @@ pub struct Mapper {
     loc: Loc,
     /// The node the next keyframe chains to by odometry, if the chain is unbroken.
     chain: Option<usize>,
+    /// Stops placed since the whole graph was last re-solved.
+    since_full: usize,
     path: f64,
     turn: f64,
     last_odom: Option<StateSample>,
@@ -418,6 +460,7 @@ impl Mapper {
                 map_from_odom: Pose2::IDENTITY,
             },
             chain: None,
+            since_full: 0,
             path: 0.0,
             turn: 0.0,
             last_odom: None,
@@ -754,6 +797,11 @@ impl Mapper {
                 // is put down.
                 return;
             }
+            // The searches to come match against the map: let it be the whole graph's best
+            // estimate, not one whose old keyframes waited for the next full solve.
+            if self.since_full > 0 {
+                self.optimize();
+            }
             self.loc = Loc::Lost { cause, hint };
             self.lost_keyframes = 0;
             self.events.push(Event::Lost { cause });
@@ -915,6 +963,9 @@ impl Mapper {
                 // Two stops in a row disagree with the map: the pose is wrong, not the map.
                 self.contradictions = 0;
                 self.last_pose = Some(predicted);
+                if self.since_full > 0 {
+                    self.optimize();
+                }
                 self.loc = Loc::Lost {
                     cause: LostCause::Contradiction,
                     hint: Hint::Pose {
@@ -945,17 +996,9 @@ impl Mapper {
             // moved chair. Keep it, chained, unmatched.
             let p = map_from_odom.compose(prev.odom);
             let n = self.add_node(prev, p, main, false);
-            if let Some(c) = self.chain {
-                self.odometry_edge(c, n);
-            }
+            self.link(n);
             self.chain = Some(n);
         }
-
-        let node = self.add_node(kf, predicted, main, false);
-        if let Some(c) = self.chain {
-            self.odometry_edge(c, node);
-        }
-        self.chain = Some(node);
 
         let matched = m.as_ref().map(|(m, _)| MatchSummary {
             accepted: good,
@@ -971,6 +1014,43 @@ impl Mapper {
                 m.cov[2][2].sqrt().to_degrees(),
             ],
         });
+        // A believed stop at a place the map already has: its pose stays in the graph — the match
+        // and the odometry through it, exactly as for any stop — but not its scan.
+        let covered_by = match m.as_ref() {
+            Some((mm, _))
+                if good
+                    && mm.rank == 3
+                    && mm.hit_frac >= self.cfg.cover_min_hit_frac
+                    && mm.conflict_frac <= self.cfg.cover_max_conflict =>
+            {
+                self.covering(main, mm.pose, &kf)
+            }
+            _ => None,
+        };
+        let mut kf = kf;
+        if covered_by.is_some() {
+            kf.occ.clear();
+            kf.free.clear();
+            kf.span_rad = 0.0;
+        }
+        // A stop whose match is not believed, where the map already has two views: its scan would
+        // only be placed where odometry guesses. Odometry carries on past it.
+        if !good
+            && self.chain.is_some()
+            && let Some(by) = self.covering(main, predicted, &kf)
+        {
+            self.events.push(Event::Covered {
+                by,
+                frames,
+                matched,
+            });
+            return;
+        }
+
+        let node = self.add_node(kf, predicted, main, false);
+        self.link(node);
+        self.chain = Some(node);
+
         if let (true, Some((m, _))) = (good, m.as_ref()) {
             let r = local[0];
             let z = self.graph.nodes[r].between(m.pose);
@@ -981,32 +1061,28 @@ impl Mapper {
                 info: info_in_frame(&m.info, m.pose.yaw),
                 kind: EdgeKind::Match,
             });
-            // Each direction's uncertainty restarts when a match pins it: both translation
-            // directions for the position, the heading for the yaw.
-            let (xy_vals, _) = crate::matcher::eigen_sym3([
-                [m.info[0][0], m.info[0][1], 0.0],
-                [m.info[1][0], m.info[1][1], 0.0],
-                [0.0, 0.0, 1.0],
-            ]);
-            let pinned_xy = 1.0 / (2.0 * self.cfg.track_min_xy_m / 3.0).powi(2);
-            if xy_vals[0].min(xy_vals[1]) > pinned_xy {
-                self.path_since_match = 0.0;
-            }
-            if m.info[2][2] > 1.0 / (self.cfg.track_min_yaw_rad / 3.0).powi(2) {
-                self.turn_since_yaw = 0.0;
-                self.t_yaw_ns = self.keyframes[node].t_end_ns;
-            }
+            self.note_pinned(&m.info, self.keyframes[node].t_end_ns);
         }
-        self.events.push(Event::Keyframe {
-            id: node as u32,
-            frames,
-            occ,
-            free,
-            matched,
-        });
+        match covered_by {
+            Some(by) => self.events.push(Event::Covered {
+                by,
+                frames,
+                matched,
+            }),
+            None => self.events.push(Event::Keyframe {
+                id: node as u32,
+                frames,
+                occ,
+                free,
+                matched,
+            }),
+        }
 
-        self.try_loop(node, &local);
-        self.optimize();
+        if covered_by.is_none() && self.try_loop(node, &local) {
+            self.optimize();
+        } else {
+            self.optimize_near(node);
+        }
         if let Loc::Tracking { .. } = self.loc {
             self.loc = Loc::Tracking {
                 map_from_odom: self.graph.nodes[node].compose(self.keyframes[node].odom.inverse()),
@@ -1112,7 +1188,8 @@ impl Mapper {
         a.dist(b) <= self.cfg.agree_m && wrap(a.yaw - b.yaw).abs() <= self.cfg.agree_rad
     }
 
-    fn try_loop(&mut self, node: usize, local: &[usize]) {
+    /// True when it closed a loop.
+    fn try_loop(&mut self, node: usize, local: &[usize]) -> bool {
         let main = self.main_island();
         let here = self.path_at[node];
         let min_gap = self.cfg.loop_min_path_m;
@@ -1124,10 +1201,10 @@ impl Mapper {
         let cands = self.nearby(main, predicted, radius + 1.5, 24, &far_back);
         if cands.is_empty() {
             self.pending_loop = None;
-            return;
+            return false;
         }
         let Some(field) = self.field_of(&cands) else {
-            return;
+            return false;
         };
         let scan = self.composite(node);
         let win = Window {
@@ -1137,11 +1214,11 @@ impl Mapper {
             step_yaw: 2f64.to_radians(),
         };
         let Some(w) = match_wide(&field, &scan, win, &self.cfg.matcher) else {
-            return;
+            return false;
         };
         if !self.wide_ok(&w.best, w.margin, scan.span_rad, self.cfg.loop_half_yaw_rad) {
             self.pending_loop = None;
-            return;
+            return false;
         }
         let implied = w.best.pose.compose(self.keyframes[node].odom.inverse());
         let ref_node = cands[0];
@@ -1169,13 +1246,36 @@ impl Mapper {
                     to: node,
                     correction: self.graph.nodes[node].between(this.m.pose),
                 });
+                true
             }
-            _ => self.pending_loop = Some(this),
+            _ => {
+                self.pending_loop = Some(this);
+                false
+            }
         }
     }
 
+    /// Re-solve the whole graph.
     fn optimize(&mut self) {
-        let Some(r) = self.graph.optimize(&self.cfg.graph) else {
+        self.since_full = 0;
+        self.optimize_from(0);
+    }
+
+    /// Re-solve the newest keyframes up to `node`, holding the rest — or the whole graph, when
+    /// it has not been for `full_optimize_every` stops.
+    fn optimize_near(&mut self, node: usize) {
+        self.since_full += 1;
+        if self.since_full >= self.cfg.full_optimize_every {
+            self.optimize();
+            return;
+        }
+        let k = self.cfg.local_optimize_keyframes.max(1);
+        self.optimize_from((node + 1).saturating_sub(k));
+    }
+
+    /// Optimize the nodes from `first` on.
+    fn optimize_from(&mut self, first: usize) {
+        let Some(r) = self.graph.optimize_only(&self.cfg.graph, |i| i >= first) else {
             return;
         };
         if r.outliers.is_empty() {
@@ -1190,7 +1290,64 @@ impl Mapper {
             });
         }
         self.repair_components();
-        self.graph.optimize(&self.cfg.graph);
+        self.graph.optimize_only(&self.cfg.graph, |i| i >= first);
+    }
+
+    /// Chain a new node to the last one by odometry, if the chain is unbroken.
+    fn link(&mut self, node: usize) {
+        if let Some(c) = self.chain {
+            self.odometry_edge(c, node);
+        }
+    }
+
+    /// Restart each direction's uncertainty that a match pinned: both translation directions for
+    /// the position, the heading for the yaw.
+    fn note_pinned(&mut self, info: &Mat3, t_end_ns: u64) {
+        let (xy_vals, _) = crate::matcher::eigen_sym3([
+            [info[0][0], info[0][1], 0.0],
+            [info[1][0], info[1][1], 0.0],
+            [0.0, 0.0, 1.0],
+        ]);
+        let pinned_xy = 1.0 / (2.0 * self.cfg.track_min_xy_m / 3.0).powi(2);
+        if xy_vals[0].min(xy_vals[1]) > pinned_xy {
+            self.path_since_match = 0.0;
+        }
+        if info[2][2] > 1.0 / (self.cfg.track_min_yaw_rad / 3.0).powi(2) {
+            self.turn_since_yaw = 0.0;
+            self.t_yaw_ns = t_end_ns;
+        }
+    }
+
+    /// The map keyframe that already covers a stop matched at `at`, if one does: it stood close,
+    /// facing the same way, and saw at least about as much.
+    fn covering(&self, main: u32, at: Pose2, kf: &Keyframe) -> Option<usize> {
+        let mut by: Vec<(f64, usize)> = (0..self.keyframes.len())
+            .filter(|&i| self.island[i] == main && !self.keyframes[i].occ.is_empty())
+            .filter(|&i| {
+                let p = self.graph.nodes[i];
+                let k = &self.keyframes[i];
+                p.dist(at) <= self.cfg.cover_xy_m
+                    && wrap(p.yaw - at.yaw).abs() <= self.cfg.cover_yaw_rad
+                    && k.span_rad >= 0.8 * kf.span_rad
+                    && k.occ.len() >= kf.occ.len() / 2
+            })
+            .map(|i| (self.graph.nodes[i].dist(at), i))
+            .collect();
+        if by.len() < self.cfg.cover_min_keyframes.max(1) {
+            return None;
+        }
+        // They must have seen about as much as this stop (a fifth less is scan-to-scan noise): a
+        // stop that sees clearly more than the map has there is kept.
+        let seen: usize = by
+            .iter()
+            .map(|&(_, i)| self.keyframes[i].occ.len())
+            .max()
+            .unwrap_or(0);
+        if 5 * seen < 4 * kf.occ.len() {
+            return None;
+        }
+        by.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Some(by[0].1)
     }
 
     /// After edges are removed, make every connected piece of the graph an island with its own

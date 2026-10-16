@@ -13,8 +13,10 @@
 //! **Solver.** Levenberg–Marquardt with step acceptance, on a skyline (envelope) Cholesky. The
 //! graph is a chain with a few long edges, so the envelope of each row reaches back only to its
 //! oldest neighbour: a closure from node 300 to node 5 makes row 300 dense from column 5, and no
-//! other row grows. That is linear in the chain for the cost of one dense row per closure — the
-//! old dense 3N×3N solve was cubic and ran on every freeze. Scan-match and loop edges go through a
+//! other row grows. Every match to an old keyframe is such a row, though, and a robot pacing one
+//! room makes one at nearly every stop: the whole-graph solve grows with the square of the map
+//! (measured, `tests/scale.rs`). So a stop solves only its newest keyframes
+//! ([`Graph::optimize_only`]), and the whole graph is solved when something spans it. Scan-match and loop edges go through a
 //! Cauchy kernel, so one wrong closure bends instead of folding the map; edges whose residual
 //! stays wild after optimization are reported for removal.
 
@@ -23,6 +25,10 @@ use serde::{Deserialize, Serialize};
 use crate::se2::{Pose2, wrap};
 
 pub type Mat3 = [[f64; 3]; 3];
+
+/// A solve with more free nodes than this renumbers them first (see [`Graph::reorder`]). Below it
+/// the walk order is already a band; above it, revisits make it nearly dense.
+const REORDER_ABOVE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,10 +156,11 @@ impl Graph {
         self.edges.push(e);
     }
 
-    fn cost(&self, nodes: &[Pose2], cfg: &GraphConfig) -> f64 {
+    fn cost(&self, nodes: &[Pose2], cfg: &GraphConfig, edges: &[usize]) -> f64 {
         let c2 = cfg.cauchy_c * cfg.cauchy_c;
-        self.edges
+        edges
             .iter()
+            .map(|&i| &self.edges[i])
             .map(|e| {
                 let (r, _, _) = e.linearize(nodes[e.from], nodes[e.to]);
                 let s = quad(&r, &e.info);
@@ -168,21 +175,59 @@ impl Graph {
 
     /// Optimize every free node. Returns `None` when there is nothing to move.
     pub fn optimize(&mut self, cfg: &GraphConfig) -> Option<Report> {
+        self.optimize_only(cfg, |_| true)
+    }
+
+    /// Optimize the free nodes `movable` admits, holding every other node where it is. Only the
+    /// edges that touch a moved node take part: the rest of the graph is a constant. A new stop
+    /// re-solves its own neighbourhood this way — the whole graph is re-solved only when something
+    /// spans it, a loop closure or a relocalization — so a stop costs the same in a map of thirty
+    /// keyframes as in a map of three hundred.
+    pub fn optimize_only(
+        &mut self,
+        cfg: &GraphConfig,
+        movable: impl Fn(usize) -> bool,
+    ) -> Option<Report> {
+        self.solve(cfg, movable, true)
+    }
+
+    /// The whole graph in walk order, never renumbered: the reference the renumbering is tested
+    /// against.
+    #[cfg(test)]
+    fn optimize_unordered(&mut self, cfg: &GraphConfig) -> Option<Report> {
+        self.solve(cfg, |_| true, false)
+    }
+
+    fn solve(
+        &mut self,
+        cfg: &GraphConfig,
+        movable: impl Fn(usize) -> bool,
+        renumber: bool,
+    ) -> Option<Report> {
         let mut var = vec![usize::MAX; self.nodes.len()];
         let mut n_var = 0;
         for (i, &f) in self.fixed.iter().enumerate() {
-            if !f {
+            if !f && movable(i) {
                 var[i] = n_var;
                 n_var += 1;
             }
         }
-        if n_var == 0 || self.edges.is_empty() {
+        let active: Vec<usize> = (0..self.edges.len())
+            .filter(|&i| {
+                let e = &self.edges[i];
+                var[e.from] != usize::MAX || var[e.to] != usize::MAX
+            })
+            .collect();
+        if n_var == 0 || active.is_empty() {
             return None;
+        }
+        if renumber && n_var > REORDER_ABOVE {
+            self.reorder(&mut var, n_var, &active);
         }
         let n = 3 * n_var;
         // Envelope: each block row reaches back to its oldest connected free block.
         let mut first_block: Vec<usize> = (0..n_var).collect();
-        for e in &self.edges {
+        for e in active.iter().map(|&i| &self.edges[i]) {
             let (a, b) = (var[e.from], var[e.to]);
             if a != usize::MAX && b != usize::MAX {
                 let (lo, hi) = if a < b { (a, b) } else { (b, a) };
@@ -192,7 +237,10 @@ impl Graph {
         let first: Vec<usize> = (0..n).map(|i| 3 * first_block[i / 3]).collect();
 
         let c2 = cfg.cauchy_c * cfg.cauchy_c;
-        let initial_cost = self.cost(&self.nodes, cfg);
+        // Cost and outliers over every edge, as a whole-graph solve has them: the convergence test
+        // is relative to the cost, and an edge the robot has walked away from can still be wrong.
+        let all: Vec<usize> = (0..self.edges.len()).collect();
+        let initial_cost = self.cost(&self.nodes, cfg, &all);
         let mut cost = initial_cost;
         let mut lambda = 1e-4;
         let mut iterations = 0;
@@ -200,7 +248,7 @@ impl Graph {
             iterations += 1;
             let mut h = Skyline::new(&first);
             let mut g = vec![0.0; n];
-            for e in &self.edges {
+            for e in active.iter().map(|&i| &self.edges[i]) {
                 let (r, ja, jb) = e.linearize(self.nodes[e.from], self.nodes[e.to]);
                 let mut w = 1.0;
                 if e.robust() {
@@ -264,7 +312,7 @@ impl Graph {
                     trial[i].y += step[3 * vi + 1];
                     trial[i].yaw = wrap(trial[i].yaw + step[3 * vi + 2]);
                 }
-                let c = self.cost(&trial, cfg);
+                let c = self.cost(&trial, cfg, &all);
                 if c <= cost {
                     let gain = cost - c;
                     self.nodes = trial;
@@ -273,7 +321,7 @@ impl Graph {
                     accepted = true;
                     let max_step = step.iter().fold(0.0f64, |m, v| m.max(v.abs()));
                     if max_step < 1e-6 || gain < 1e-9 * (1.0 + cost) {
-                        return Some(self.report(iterations, initial_cost, cost, cfg));
+                        return Some(self.report(iterations, initial_cost, cost, cfg, &all));
                     }
                     break;
                 }
@@ -283,7 +331,56 @@ impl Graph {
                 break;
             }
         }
-        Some(self.report(iterations, initial_cost, cost, cfg))
+        Some(self.report(iterations, initial_cost, cost, cfg, &all))
+    }
+
+    /// Renumber the variables so that nodes joined by an edge sit close together: reverse
+    /// Cuthill–McKee, a breadth-first walk of the graph from a node of lowest degree. In the
+    /// walk's order a robot pacing one room is a band, not a chain whose every match reaches back
+    /// to its first keyframes — measured on 380 keyframes of laps, each such reach made the
+    /// skyline nearly dense and an iteration took 55 ms.
+    fn reorder(&self, var: &mut [usize], n_var: usize, active: &[usize]) {
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n_var];
+        for e in active.iter().map(|&i| &self.edges[i]) {
+            let (a, b) = (var[e.from], var[e.to]);
+            if a != usize::MAX && b != usize::MAX && a != b {
+                adj[a].push(b);
+                adj[b].push(a);
+            }
+        }
+        for v in &mut adj {
+            v.sort_unstable();
+            v.dedup();
+        }
+        let mut order = Vec::with_capacity(n_var);
+        let mut seen = vec![false; n_var];
+        while order.len() < n_var {
+            // Each piece from its lowest-degree node, the walk visiting low degrees first.
+            let start = (0..n_var)
+                .filter(|&v| !seen[v])
+                .min_by_key(|&v| (adj[v].len(), v))
+                .expect("an unvisited node");
+            seen[start] = true;
+            let mut head = order.len();
+            order.push(start);
+            while head < order.len() {
+                let v = order[head];
+                head += 1;
+                let mut next: Vec<usize> = adj[v].iter().copied().filter(|&w| !seen[w]).collect();
+                next.sort_unstable_by_key(|&w| (adj[w].len(), w));
+                for w in next {
+                    seen[w] = true;
+                    order.push(w);
+                }
+            }
+        }
+        let mut new_of = vec![0; n_var];
+        for (k, &v) in order.iter().rev().enumerate() {
+            new_of[v] = k;
+        }
+        for v in var.iter_mut().filter(|v| **v != usize::MAX) {
+            *v = new_of[*v];
+        }
     }
 
     fn report(
@@ -292,12 +389,12 @@ impl Graph {
         initial_cost: f64,
         final_cost: f64,
         cfg: &GraphConfig,
+        active: &[usize],
     ) -> Report {
         let lim = cfg.outlier_mahalanobis * cfg.outlier_mahalanobis;
-        let outliers = self
-            .edges
+        let outliers = active
             .iter()
-            .enumerate()
+            .map(|&i| (i, &self.edges[i]))
             .filter(|(_, e)| e.robust())
             .filter(|(_, e)| {
                 let (r, _, _) = e.linearize(self.nodes[e.from], self.nodes[e.to]);
@@ -516,6 +613,49 @@ mod tests {
         for i in 0..n {
             let r: f64 = (0..n).map(|j| a[i][j] * x[j]).sum();
             assert!((r - b[i]).abs() < 1e-9, "row {i}: {r} vs {}", b[i]);
+        }
+    }
+
+    #[test]
+    fn renumbering_does_not_change_the_answer() {
+        // Laps of a square with a match back to the first lap at every corner: the graph a robot
+        // pacing one room makes, large enough to be renumbered. Solved again in walk order, the
+        // answer must be the same.
+        let noise = OdometryNoise::default();
+        let mut g = Graph::default();
+        g.add_node(Pose2::IDENTITY, true);
+        let mut pose = Pose2::IDENTITY;
+        let turn = std::f64::consts::FRAC_PI_2 - 2f64.to_radians();
+        for i in 1..=100usize {
+            let z = Pose2::new(1.0, 0.0, turn);
+            pose = pose.compose(z);
+            g.add_node(pose, false);
+            g.add_edge(Edge {
+                from: i - 1,
+                to: i,
+                z,
+                info: noise.info(z, 1.0, turn, 10.0),
+                kind: EdgeKind::Odometry,
+            });
+            if i >= 4 {
+                g.add_edge(Edge {
+                    from: i % 4,
+                    to: i,
+                    z: Pose2::IDENTITY,
+                    info: iso(0.03, 0.02),
+                    kind: EdgeKind::Match,
+                });
+            }
+        }
+        assert!(g.nodes.len() - 1 > REORDER_ABOVE);
+        let mut walk = g.clone();
+        g.optimize(&GraphConfig::default()).unwrap();
+        walk.optimize_unordered(&GraphConfig::default()).unwrap();
+        for (a, b) in g.nodes.iter().zip(&walk.nodes) {
+            assert!(
+                a.dist(*b) < 1e-6 && wrap(a.yaw - b.yaw).abs() < 1e-6,
+                "{a:?} vs {b:?}"
+            );
         }
     }
 

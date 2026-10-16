@@ -78,6 +78,37 @@ of it true. The floor the robot walked on between stops is free too, and the map
    with a wide coarse-to-fine search.
 4. **Optimized**, and the map-from-odometry transform taken from the keyframe's new pose.
 
+**A stop the map already covers adds no scan.** When at least `cover_min_keyframes` keyframes
+already stood within `cover_xy_m` of a stop, facing within `cover_yaw_rad`, and saw about as much,
+the stop's scan is not kept. With a believed, fully pinned and clean match its pose stays in the
+graph — the match and the odometry through it, as for any stop — as a node without a scan; without a
+believed match it is dropped and odometry carries on past it. The map's content then grows with the
+room seen, not with the time spent in it: 600 stops of laps in the synthetic room keep ~250 scans,
+not 600, and end as close to the truth as keeping them all (8.1 cm vs 8.0 cm after eight laps).
+Two views are kept, not one: skipping the second stop at a place left the next stop a single scan to
+match against, 12 cm off, and refused. A first version chained the next keyframe to a covered stop's
+fused pose instead of keeping the node; it fed the graph's own estimate back in as a measurement and
+ended 33 cm off after eight laps with whole-graph solves.
+
+*Not yet measured on the ground truth*: the recorded sessions are 4–7 minutes and no stop in them is
+covered at the default. With one view enough (`cover_min_keyframes = 1`) three unmatched stops of
+session 3 are dropped and a seated carry is then found 16 cm off — over the 15 cm line. A long
+session is what this needs.
+
+**A stop costs the same in any map.** Every stop used to re-solve the whole graph, and each match
+edge to an old keyframe makes its row of the skyline dense back to it: measured in the synthetic
+room, 8 ms a stop at 50 keyframes, 390 ms at 600 (laptop; the board is several times slower). A
+stop now re-solves only its `local_optimize_keyframes` newest keyframes, the rest held where they
+are; the whole graph is re-solved after a loop closure or a relocalization, every
+`full_optimize_every` stops, and the moment the robot goes lost, so every relocalization searches a
+fully solved map. A whole-graph solve renumbers its nodes first (reverse Cuthill–McKee): a robot
+pacing one room matches old keyframes at nearly every stop, and in walk order that made the skyline
+nearly dense — 55 ms an iteration at 380 nodes. With all of it, at 600 stops a stop costs ~4 ms
+median, and the rare whole-graph solve ~120 ms (laptop). The
+last of these was the one the regression bench asked for: without it, two of the ground-truth
+session's carries were no longer recovered. `mapd` logs each stop's time and the map's size
+(`stop processed`).
+
 **A direction a scan does not pin gets no weight.** One wall seen through the keyhole fixes the
 distance to the wall and says nothing about the position along it; the covariance comes out as
 wide as the window in that direction, and the edge's information there is zero. The graph keeps
@@ -97,8 +128,8 @@ the direction of travel) and angle turned; heading is the gyro's and is believed
 gave every odometry edge a flat 0.10 m / 0.05 rad, which handed one loop closure ~96 % of the yaw
 vote: 6.7° of heading error tracked where raw odometry had 0.1°.
 
-**The solver** is Levenberg–Marquardt with step acceptance on a skyline Cholesky — a chain with a
-few long edges, so it stays linear in the walk. Match, loop and relocalization edges go through a
+**The solver** is Levenberg–Marquardt with step acceptance on a skyline Cholesky, over the nodes a
+solve is allowed to move. Match, loop and relocalization edges go through a
 Cauchy kernel; an edge that still disagrees after optimization is removed, and any piece of graph
 that leaves disconnected becomes its own island (§4).
 
