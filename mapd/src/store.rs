@@ -10,7 +10,6 @@
 //! to `<name>.bad-<seconds>` and said so in the journal, and the new map starts beside it; the old
 //! one is still there for whoever wants to know what happened.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use maploc::mapper::{SESSION_VERSION, Session};
@@ -98,9 +97,12 @@ pub fn save(path: &Path, session: &Session) -> std::io::Result<()> {
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
     {
-        let mut f = std::fs::File::create(&tmp)?;
-        serde_json::to_writer(&mut f, session).map_err(std::io::Error::other)?;
-        f.flush()?;
+        // Buffered: serde writes token by token, and unbuffered every one was a syscall — a
+        // million of them for a 1.2 MB map, 20 s on a throttled board, with the worker that
+        // places stops waiting on it.
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
+        serde_json::to_writer(&mut w, session).map_err(std::io::Error::other)?;
+        let f = w.into_inner().map_err(|e| e.into_error())?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
@@ -119,6 +121,40 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use maploc::mapper::{Mapper, MapperConfig};
+
+    /// How long saving a map of a hundred robot-sized stops takes — a measurement, not a check:
+    /// `cargo test --release -p mapd save_speed -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn save_speed() {
+        use maploc::keyframe::Keyframe;
+        let mut s = Mapper::new(MapperConfig::default()).session();
+        for i in 0..100u32 {
+            s.keyframes.push(Keyframe {
+                id: i,
+                odom: maploc::se2::Pose2::IDENTITY,
+                t_start_ns: 0,
+                t_end_ns: 0,
+                res_m: 0.025,
+                occ: (0..100).map(|k| [k as i16, -(k as i16)]).collect(),
+                free: (0..1500)
+                    .map(|k| [(k % 40) as i16, (k / 40) as i16])
+                    .collect(),
+                n_frames: 50,
+                span_rad: 1.0,
+            });
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("map.json");
+        let t = std::time::Instant::now();
+        save(&path, &s).unwrap();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let mb = std::fs::metadata(&path).unwrap().len() as f64 / 1e6;
+        println!(
+            "saved {} keyframes, {mb:.1} MB, in {ms:.0} ms",
+            s.keyframes.len()
+        );
+    }
 
     #[test]
     fn a_map_survives_the_round_trip() {
