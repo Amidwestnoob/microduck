@@ -560,3 +560,28 @@ fn lapping_one_room_the_map_stops_growing() {
     );
     assert!(e < 0.10 && a < 3.0, "{e:.3} m {a:.1}°");
 }
+
+#[test]
+fn a_map_of_one_stop_and_a_sit_starts_over_instead_of_staying_lost() {
+    // Measured on the robot: the map wiped, one thin stop, a sit — and every stop after it was
+    // searched for in that one stop, refused, and kept apart: the map never grew.
+    let mut steps = first_stop();
+    steps.push(Step::Sit {
+        secs: 3.0,
+        to: None,
+    });
+    steps.extend(lap());
+    let r = run(Mapper::new(MapperConfig::default()), start(), &steps);
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e, Event::MapRestarted { .. })),
+        "the one-stop map was searched for, not restarted"
+    );
+    assert!(r.mapper.lost().is_none(), "still lost at the end");
+    let (in_map, islands) = r.mapper.counts();
+    assert!(
+        in_map > 5 && islands == 0,
+        "{in_map} in the map, {islands} apart"
+    );
+}

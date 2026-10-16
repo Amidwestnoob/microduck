@@ -362,6 +362,11 @@ fn log_event(e: &Event) {
             frames,
             "stop covered by keyframes already in the map, match not believed: dropped"
         ),
+        Event::MapRestarted { dropped, kept } => tracing::warn!(
+            dropped,
+            kept,
+            "map restarted: too little of it to search for, or the robot is somewhere it does not know"
+        ),
         Event::LoopClosed {
             from,
             to,

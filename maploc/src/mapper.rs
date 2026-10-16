@@ -163,6 +163,12 @@ pub struct MapperConfig {
     /// ...and this many keyframes already cover it: the map keeps a second view of every place,
     /// so a stop is still matched against more than one scan of what it sees.
     pub cover_min_keyframes: usize,
+    /// A map with fewer keyframes than this is not searched for when the robot is lost: there is
+    /// too little of it to recognise, and the robot would stay lost for good. It starts over.
+    pub min_map_keyframes: usize,
+    /// An island this large, and at least twice the size of the map it cannot join, becomes the
+    /// map: the robot is somewhere the map does not know.
+    pub island_takeover_keyframes: usize,
 }
 
 impl Default for MapperConfig {
@@ -236,6 +242,10 @@ impl Default for MapperConfig {
             // One was not enough (measured in the synthetic room): skipping the second stop at the
             // start left the next stop one scan to match against, 12 cm off, and it was refused.
             cover_min_keyframes: 2,
+            // Measured on the robot: a map wiped, one thin stop, then a sit — every stop after
+            // was searched for in that one stop and refused, and the map never grew.
+            min_map_keyframes: 3,
+            island_takeover_keyframes: 12,
         }
     }
 }
@@ -326,6 +336,12 @@ pub enum Event {
         node: usize,
         pose: Pose2,
         after_keyframes: usize,
+    },
+    /// The map was replaced: too young to be searched for when the robot went lost, or outgrown
+    /// by the island the robot built since. `kept` keyframes of the island start the new map.
+    MapRestarted {
+        dropped: usize,
+        kept: usize,
     },
     /// An edge the optimized graph refused, removed.
     EdgeRejected {
@@ -1090,6 +1106,60 @@ impl Mapper {
         }
     }
 
+    /// Start the map over from `keep` (keyframes of one island, in order; none for an empty map),
+    /// tracking from where the robot is. Island poses live in the odometry frame, so the new map's
+    /// frame is the odometry frame.
+    fn restart_with(&mut self, keep: &[usize]) {
+        let dropped = self.keyframes.len() - keep.len();
+        let mut new_of = vec![usize::MAX; self.keyframes.len()];
+        for (k, &i) in keep.iter().enumerate() {
+            new_of[i] = k;
+        }
+        let keyframes: Vec<Keyframe> = keep
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| {
+                let mut kf = self.keyframes[i].clone();
+                kf.id = k as u32;
+                kf
+            })
+            .collect();
+        let mut graph = Graph::default();
+        for (k, &i) in keep.iter().enumerate() {
+            graph.add_node(self.graph.nodes[i], k == 0);
+        }
+        for e in &self.graph.edges {
+            if new_of[e.from] != usize::MAX && new_of[e.to] != usize::MAX {
+                let mut e = e.clone();
+                e.from = new_of[e.from];
+                e.to = new_of[e.to];
+                graph.add_edge(e);
+            }
+        }
+        self.path_at = keep.iter().map(|&i| self.path_at[i]).collect();
+        self.turn_at = keep.iter().map(|&i| self.turn_at[i]).collect();
+        self.island = vec![0; keep.len()];
+        self.next_island = 1;
+        self.keyframes = keyframes;
+        self.graph = graph;
+        self.chain = self
+            .chain
+            .and_then(|c| (new_of[c] != usize::MAX).then_some(new_of[c]));
+        self.suspect = None;
+        self.pending_loop = None;
+        self.pending_reloc.clear();
+        self.contradictions = 0;
+        self.lost_keyframes = 0;
+        self.since_full = 0;
+        self.loc = Loc::Tracking {
+            map_from_odom: Pose2::IDENTITY,
+        };
+        self.events.push(Event::MapRestarted {
+            dropped,
+            kept: keep.len(),
+        });
+    }
+
     fn hint(&self) -> Hint {
         match self.loc {
             Loc::Lost { hint, .. } => hint,
@@ -1415,6 +1485,13 @@ impl Mapper {
 
     /// A stop while lost: add it to the island, then look for the island in the map.
     fn search(&mut self, kf: Keyframe, cause: LostCause, hint: Hint) {
+        if self.counts().0 < self.cfg.min_map_keyframes {
+            // Too little mapped to be recognised: start over here, this stop first. Decided at
+            // the first stop while lost, not when it went lost — a bump puts it back on track.
+            self.restart_with(&[]);
+            self.place(kf);
+            return;
+        }
         let (frames, occ, free) = (kf.n_frames, kf.occ.len(), kf.free.len());
         let isl = match self.chain {
             Some(c) => self.island[c],
@@ -1433,6 +1510,22 @@ impl Mapper {
         }
         self.chain = Some(node);
         self.lost_keyframes += 1;
+        let in_island = self.island.iter().filter(|&&i| i == isl).count();
+        if in_island >= self.cfg.island_takeover_keyframes && in_island >= 2 * self.counts().0 {
+            // Somewhere the map does not know, for long enough: this is the map now.
+            let keep: Vec<usize> = (0..self.keyframes.len())
+                .filter(|&i| self.island[i] == isl)
+                .collect();
+            self.restart_with(&keep);
+            self.events.push(Event::Keyframe {
+                id: self.chain.expect("the island's newest node") as u32,
+                frames,
+                occ,
+                free,
+                matched: None,
+            });
+            return;
+        }
         self.events.push(Event::Keyframe {
             id: node as u32,
             frames,
