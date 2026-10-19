@@ -3437,9 +3437,7 @@ fn run_robot(socket: &Path, command: RobotCommand) -> Result<(), Failure> {
             *json,
         ),
         RobotCommand::Do { skill, json } => (
-            proto::Call::RobotDo(proto::DoParams {
-                skill: skill.clone(),
-            }),
+            proto::Call::RobotDo(proto::DoParams::new(skill.clone())),
             *json,
         ),
         RobotCommand::Mode { json } => (proto::Call::RobotMode, *json),

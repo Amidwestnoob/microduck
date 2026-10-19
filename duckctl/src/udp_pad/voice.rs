@@ -14,6 +14,12 @@
 //! robot's own synth (`sounds`) on a thread of its own, so the pad drives at once and the
 //! laptop starts quacking a moment later.
 //!
+//! **The emotions' sounds play here too.** The duck's buttons start emotions, and with the laptop
+//! speaking for it the duck plays them without their sound (`robot.do`'s `quiet`); `udp-pad`
+//! plays it here the moment the robot's report says one started ([`Voice::emotion`]). The wavs
+//! are the robot's own set, embedded at build time (`build.rs`), so they are the duck's sound
+//! rather than this laptop's voice.
+//!
 //! The sound goes to the system's default output, whatever this machine has selected. On Linux
 //! that is libasound opened when it is needed rather than linked (`voice/alsa.rs`, which says
 //! why); on macOS and Windows it is `cpal` (`voice/cpal_out.rs`).
@@ -66,12 +72,18 @@ impl Triggers {
     }
 }
 
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/emotions.rs"));
+}
+
 /// Every sound the laptop plays, rendered once at the output's rate.
 pub struct Bank {
     quacks: Vec<Vec<f32>>,
     /// Each wheee variant's start and loop. The end segment is the ride *landing*, which on the
     /// robot is only a pad that went quiet mid-ride; a release cuts, here as there.
     rides: Vec<(Vec<f32>, Vec<f32>)>,
+    /// The emotions' sounds, by name.
+    emotions: Vec<(String, Vec<f32>)>,
 }
 
 impl Bank {
@@ -88,8 +100,39 @@ impl Bank {
                     (fit(start), fit(loop_seg))
                 })
                 .collect(),
+            emotions: embedded::EMOTIONS
+                .iter()
+                .filter_map(|(name, wav)| Some((name.to_string(), decode(wav, rate)?)))
+                .collect(),
         }
     }
+}
+
+/// A wav as mono samples at `rate`; `None` for one that will not decode, which is a silent
+/// emotion rather than a laptop with no voice.
+fn decode(wav: &[u8], rate: u32) -> Option<Vec<f32>> {
+    let reader = hound::WavReader::new(std::io::Cursor::new(wav)).ok()?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            let full = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .into_samples::<i32>()
+                .map(|s| s.map(|s| s as f32 / full))
+                .collect::<Result<_, _>>()
+                .ok()?
+        }
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .collect::<Result<_, _>>()
+            .ok()?,
+    };
+    let channels = usize::from(spec.channels.max(1));
+    let mono: Vec<f32> = samples
+        .chunks(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect();
+    Some(resample(&mono, spec.sample_rate, rate))
 }
 
 /// Linear interpolation: the bank is a few seconds of voice, played once in a while, so the
@@ -117,6 +160,7 @@ enum Clip {
     Quack(usize),
     Start(usize),
     Loop(usize),
+    Emotion(usize),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -185,6 +229,27 @@ impl Mixer {
         }
     }
 
+    /// Play an emotion's sound, cutting whatever plays; `false` for a name with no sound here.
+    pub fn emotion(&mut self, name: &str) -> bool {
+        let Some(i) = self
+            .bank
+            .as_ref()
+            .and_then(|b| b.emotions.iter().position(|(n, _)| n == name))
+        else {
+            return false;
+        };
+        self.play(Clip::Emotion(i));
+        true
+    }
+
+    /// The emotion is over on the robot: its sound stops here too, if it is still going — an
+    /// emotion cut short by a fall or a sit is cut short here as well.
+    pub fn emotion_over(&mut self) {
+        if matches!(self.now, Some(p) if matches!(p.clip, Clip::Emotion(_))) {
+            self.stop();
+        }
+    }
+
     fn play(&mut self, clip: Clip) {
         self.stop();
         self.now = Some(Play {
@@ -231,12 +296,13 @@ fn next(bank: &Bank, slot: &mut Option<Play>, fade: usize) -> f32 {
         Clip::Quack(v) => &bank.quacks[v],
         Clip::Start(v) => &bank.rides[v].0,
         Clip::Loop(v) => &bank.rides[v].1,
+        Clip::Emotion(v) => &bank.emotions[v].1,
     };
     if p.pos >= clip(p.clip).len() {
         match p.clip {
             Clip::Start(v) => p.clip = Clip::Loop(v),
             Clip::Loop(_) => {}
-            Clip::Quack(_) => {
+            Clip::Quack(_) | Clip::Emotion(_) => {
                 *slot = None;
                 return 0.0;
             }
@@ -290,6 +356,18 @@ impl Voice {
         }
         if let Ok(mut m) = self.mixer.lock() {
             m.cue(cues);
+        }
+    }
+
+    /// An emotion started on the robot: play its sound. `false` for one this build has no sound
+    /// for — an emotion the robot was given that this laptop's `duckctl` predates.
+    pub fn emotion(&self, name: &str) -> bool {
+        self.mixer.lock().is_ok_and(|mut m| m.emotion(name))
+    }
+
+    pub fn emotion_over(&self) {
+        if let Ok(mut m) = self.mixer.lock() {
+            m.emotion_over();
         }
     }
 }
@@ -376,6 +454,7 @@ mod tests {
         m.load(Bank {
             quacks: vec![vec![1.0; 50]],
             rides: vec![(vec![0.5; 20], vec![0.25; 10])],
+            emotions: vec![("yes".to_owned(), vec![0.75; 30])],
         });
         m
     }
@@ -401,6 +480,38 @@ mod tests {
         m.fill(&mut out);
         assert!(out[..50].iter().all(|&s| s == GAIN));
         assert!(out[50..].iter().all(|&s| s == 0.0));
+    }
+
+    /// An emotion's sound plays once, a name with no sound plays nothing, and the emotion ending
+    /// on the robot early fades it out here.
+    #[test]
+    fn an_emotion_plays_its_sound_and_stops_with_the_robot() {
+        let mut m = mixer();
+        assert!(!m.emotion("sad"), "no sound for it here");
+        assert!(m.emotion("yes"));
+        let mut out = [0.0; 40];
+        m.fill(&mut out);
+        assert!(out[..30].iter().all(|&s| s == 0.75 * GAIN));
+        assert!(out[30..].iter().all(|&s| s == 0.0), "once");
+
+        m.emotion("yes");
+        m.fill(&mut out[..10]);
+        m.emotion_over();
+        m.fill(&mut out);
+        assert!(out[1] < out[0] && out[1] > 0.0, "fading");
+        assert!(out[20..].iter().all(|&s| s == 0.0), "gone");
+    }
+
+    /// The robot's set is embedded, and every one of its sounds decodes.
+    #[test]
+    fn the_robots_emotion_sounds_are_all_here() {
+        let bank = Bank::render(1, 48_000);
+        let names: Vec<&str> = bank.emotions.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names.len(), embedded::EMOTIONS.len(), "one did not decode");
+        for name in ["yes", "no", "excited", "curious"] {
+            assert!(names.contains(&name), "{name} missing from {names:?}");
+        }
+        assert!(bank.emotions.iter().all(|(_, s)| s.len() > 4_800));
     }
 
     #[test]

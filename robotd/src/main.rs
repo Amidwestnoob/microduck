@@ -2625,21 +2625,20 @@ async fn control_loop<T: RobotIo>(
         // time: a request while one plays is dropped. X re-sends while held, so an emotion on X
         // plays again when it ends, the way a chaining skill would.
         let can_emote = was_driving && shutdown_sit.is_none() && !safety.fallen();
-        if let Some(index) = intents.take_emotion()
+        if let Some((index, quiet)) = intents.take_emotion()
             && let Some((name, wanted)) = state.emotions.get(index)
         {
             if playing.is_some() {
                 tracing::debug!(emotion = name, "emotion dropped: one is playing");
             } else if can_emote && controller.as_ref().is_some_and(|c| !c.busy()) {
-                tracing::warn!(emotion = name, "emotion started");
-                if let (Some(voice), Some(wav)) = (voice.as_mut(), wanted.sound()) {
+                tracing::warn!(emotion = name, quiet, "emotion started");
+                if let (false, Some(voice), Some(wav)) = (quiet, voice.as_mut(), wanted.sound()) {
                     voice.play_file(wav);
                 }
-                playing = Some(emotion::Playing::start(
-                    name,
-                    Arc::clone(wanted),
-                    tick_start,
-                ));
+                let mut started = emotion::Playing::start(name, Arc::clone(wanted), tick_start);
+                started.quiet = quiet;
+                started.since_t = state.started.elapsed().as_secs_f64();
+                playing = Some(started);
             } else {
                 tracing::debug!(emotion = name, "emotion refused: not driving, or busy");
             }
@@ -3971,6 +3970,11 @@ async fn control_loop<T: RobotIo>(
                     &sensors.positions,
                 ))),
                 skeleton: mapping::skeleton_at(&sensors.positions),
+                emotion: playing.as_ref().map(|p| proto::EmotionState {
+                    name: p.name.clone(),
+                    since: p.since_t,
+                    quiet: p.quiet,
+                }),
             });
         }
 
@@ -4600,7 +4604,7 @@ fn apply_intent(state: &RobotState, intents: &Intents, call: &proto::Call) -> bo
         // would be pure overhead. The one-shot press stays a request (`dispatch` refuses
         // it with a reason); the loop arbitrates either way.
         proto::Call::RobotDo(p) => {
-            queue_skill(state, intents, &p.skill);
+            queue_skill(state, intents, p);
             true
         }
         // Same story for the wheee hold, which arrives per tick while the trigger is down.
@@ -5155,9 +5159,9 @@ fn do_names(policies: &PolicyNames, emotions: &emotion::Library) -> Vec<String> 
     names
 }
 
-fn queue_skill(state: &RobotState, intents: &Intents, skill: &str) -> bool {
+fn queue_skill(state: &RobotState, intents: &Intents, p: &proto::DoParams) -> bool {
     let policies = state.policies.load();
-    match skill {
+    match p.skill.as_str() {
         "ground_pick" if policies.ground_pick.is_some() => {
             intents.request_ground_pick();
             true
@@ -5173,7 +5177,7 @@ fn queue_skill(state: &RobotState, intents: &Intents, skill: &str) -> bool {
             }
             None => match state.emotions.index(name) {
                 Some(index) => {
-                    intents.request_emotion(index);
+                    intents.request_emotion(index, p.quiet);
                     true
                 }
                 None => false,
@@ -5243,7 +5247,7 @@ fn dispatch(
                 proto::IntentResult::refused(
                     "the robot is still going to its home pose; try again in a moment",
                 )
-            } else if queue_skill(state, intents, &p.skill) {
+            } else if queue_skill(state, intents, p) {
                 proto::IntentResult::accepted()
             } else {
                 let known = do_names(&state.policies.load(), &state.emotions);
@@ -6843,9 +6847,7 @@ mod tests {
             &s,
             &intents,
             id(),
-            &proto::Call::RobotDo(proto::DoParams {
-                skill: "ground_pick".into(),
-            }),
+            &proto::Call::RobotDo(proto::DoParams::new("ground_pick")),
         )
         .result_as()
         .unwrap();
@@ -6877,9 +6879,7 @@ mod tests {
             &unconfigured,
             &intents,
             id(),
-            &proto::Call::RobotDo(proto::DoParams {
-                skill: "kick_left".into(),
-            }),
+            &proto::Call::RobotDo(proto::DoParams::new("kick_left")),
         )
         .result_as()
         .unwrap();
@@ -6895,9 +6895,7 @@ mod tests {
             &s,
             &intents,
             id(),
-            &proto::Call::RobotDo(proto::DoParams {
-                skill: "sit_toggle".into(),
-            }),
+            &proto::Call::RobotDo(proto::DoParams::new("sit_toggle")),
         )
         .result_as()
         .unwrap();
@@ -6932,15 +6930,25 @@ mod tests {
             &s,
             &intents,
             proto::Id::Number(1),
-            &proto::Call::RobotDo(proto::DoParams {
-                skill: "yes".into(),
-            }),
+            &proto::Call::RobotDo(proto::DoParams::new("yes")),
         )
         .result_as()
         .unwrap();
         assert!(accepted.accepted);
-        assert_eq!(intents.take_emotion(), Some(0));
+        assert_eq!(intents.take_emotion(), Some((0, false)));
         assert_eq!(intents.take_skills().skills, 0, "not a policy skill");
+
+        // `quiet` reaches the loop with it: the sound is the client's.
+        dispatch(
+            &s,
+            &intents,
+            proto::Id::Number(3),
+            &proto::Call::RobotDo(proto::DoParams {
+                quiet: true,
+                ..proto::DoParams::new("yes")
+            }),
+        );
+        assert_eq!(intents.take_emotion(), Some((0, true)));
 
         assert!(do_names(&s.policies.load(), &s.emotions).contains(&"yes".to_owned()));
         let ack: proto::SubscribeResult = dispatch(
@@ -8964,9 +8972,7 @@ mod tests {
             &s,
             &intents,
             proto::Id::Number(1),
-            &proto::Call::RobotDo(proto::DoParams {
-                skill: "roulade".into(),
-            }),
+            &proto::Call::RobotDo(proto::DoParams::new("roulade")),
         )
         .result_as()
         .unwrap();
@@ -8994,9 +9000,7 @@ mod tests {
             &s,
             &intents,
             proto::Id::Number(1),
-            &proto::Call::RobotDo(proto::DoParams {
-                skill: "roulade".into(),
-            }),
+            &proto::Call::RobotDo(proto::DoParams::new("roulade")),
         )
         .result_as()
         .unwrap();

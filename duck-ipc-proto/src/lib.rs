@@ -470,7 +470,16 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// laser sweep, nearest object — merged into the vet book by `robotd`, which owns it. The book
 /// gains three maps for them ([`vetbook::Life::tallies`], `highs`, `lows`), additive: an older
 /// book loads with them empty. A new route: a `robotd` predating it answers METHOD_NOT_FOUND.
-pub const API_VERSION: u32 = 44;
+///
+/// # v45 — an emotion's sound, played by the client
+///
+/// [`DoParams::quiet`]: an emotion started with it plays without its sound on the robot, for a
+/// client that plays the sound itself — `duckctl udp-pad`, whose laptop speaks for the duck.
+/// [`RobotState::emotion`] is how that client hears that the emotion actually started: a request
+/// can be dropped or refused after it was accepted (one already playing, the robot not driving).
+/// `quiet` is sent only when set, so a request without it is the v44 request; a `robotd`
+/// predating it refuses the unknown parameter, by name. The state field is additive.
+pub const API_VERSION: u32 = 45;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -1863,9 +1872,7 @@ pub mod test_support {
             Call::RobotRelax,
             Call::RobotRebootMotors(RebootMotorsParams { ids: vec![3, 11] }),
             Call::RobotRest,
-            Call::RobotDo(DoParams {
-                skill: "ground_pick".into(),
-            }),
+            Call::RobotDo(DoParams::new("ground_pick")),
             Call::RobotPose(PoseParams {
                 z: -0.01,
                 roll: 0.05,
@@ -2495,6 +2502,20 @@ pub struct RebootMotorsParams {
 #[serde(deny_unknown_fields)]
 pub struct DoParams {
     pub skill: Skill,
+    /// Leave an emotion's sound out on the robot: the client plays it. Nothing else changes, and
+    /// a skill with no sound ignores it. (v45)
+    #[serde(default, skip_serializing_if = "not")]
+    pub quiet: bool,
+}
+
+impl DoParams {
+    /// `robot.do` for `skill`, sound included.
+    pub fn new(skill: impl Into<Skill>) -> Self {
+        Self {
+            skill: skill.into(),
+            quiet: false,
+        }
+    }
 }
 
 /// Standing body pose offsets. Continuous intent — see [`method::ROBOT_POSE`].
@@ -4048,6 +4069,22 @@ pub struct RobotState {
     /// for real. `frames` is a few leaves of this. Empty from a daemon predating it. (v25)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skeleton: Vec<PoseState>,
+    /// The emotion playing, if one is. Absent otherwise, and from a daemon predating it. (v45)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotion: Option<EmotionState>,
+}
+
+/// An emotion playing, in [`RobotState::emotion`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmotionState {
+    pub name: String,
+    /// [`RobotState::t`] when it started: two plays of the same emotion back to back differ here
+    /// and nowhere else, so this is what a client watches for a start.
+    pub since: f64,
+    /// Started with [`DoParams::quiet`]: the robot is not playing its sound.
+    #[serde(skip_serializing_if = "not")]
+    pub quiet: bool,
 }
 
 /// The trunk IMU, in [`RobotState::imu`]. Trunk frame: x forward, y left, z up.
@@ -6560,6 +6597,7 @@ mod tests {
             imu: None,
             frames: None,
             skeleton: Vec::new(),
+            emotion: None,
         }
     }
 

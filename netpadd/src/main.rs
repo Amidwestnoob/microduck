@@ -186,7 +186,10 @@ async fn serve(
     // the same as `padd` does for a Bluetooth pad.
     let mut pad_loss = PadLoss::default();
     // The robot's health, for the driving client's report — read here, gathered elsewhere.
-    let robot_health = health::spawn(&args.socket);
+    let mut robot_health = health::spawn(&args.socket);
+    let mut health_alive = true;
+    // The start of the emotion last reported, so a new one is reported at once.
+    let mut emotion_reported = None::<f64>;
     let mut report_at = Instant::now() + pad_map::wire::REPORT_EVERY;
     let mut refused = None::<(&'static str, String, Instant)>;
 
@@ -263,6 +266,9 @@ async fn serve(
                     reserved_logged = true;
                 }
             }
+            changed = robot_health.changed(), if health_alive => {
+                health_alive = changed.is_ok();
+            }
             _ = tokio::time::sleep_until(wake.into()) => {}
         }
 
@@ -316,6 +322,17 @@ async fn serve(
             }
         }
 
+        let emotion = robot_health
+            .borrow()
+            .posture
+            .as_ref()
+            .and_then(|p| p.emotion.as_ref().map(|e| e.since));
+        if emotion != emotion_reported {
+            emotion_reported = emotion;
+            if emotion.is_some() {
+                report_at = now;
+            }
+        }
         if now >= report_at {
             report_at = now + pad_map::wire::REPORT_EVERY;
             if let Some(peer) = rx.peer() {
@@ -357,6 +374,13 @@ async fn serve(
                 mapper.tick(&pad, &config, now, &mut out, &mut frame);
                 if rx.sender_sounds() {
                     out.retain(|o| !trigger_sound(o));
+                    for o in &mut out {
+                        if let Out::Request(proto::Call::RobotDo(p))
+                        | Out::Notify(proto::Call::RobotDo(p)) = o
+                        {
+                            p.quiet = true;
+                        }
+                    }
                 }
                 for o in out.drain(..) {
                     let result = match &o {

@@ -328,9 +328,9 @@ impl Mapper {
                 tracing::debug!(button, "no skill bound");
                 continue;
             }
-            out.push(Out::Request(proto::Call::RobotDo(proto::DoParams {
-                skill: skill.to_owned(),
-            })));
+            out.push(Out::Request(proto::Call::RobotDo(proto::DoParams::new(
+                skill.to_owned(),
+            ))));
         }
 
         // Home: the flashlight. Not bindable — it is not a skill, and the robot owns the toggle.
@@ -355,9 +355,9 @@ impl Mapper {
         // the prototype held the roulade on.
         let held = cfg.bindings.skill("x").unwrap_or_default();
         if pad.held.contains(Buttons::X) && !pad.pressed.contains(Buttons::X) && !held.is_empty() {
-            out.push(Out::Notify(proto::Call::RobotDo(proto::DoParams {
-                skill: held.to_owned(),
-            })));
+            out.push(Out::Notify(proto::Call::RobotDo(proto::DoParams::new(
+                held.to_owned(),
+            ))));
         }
 
         // Select: nothing on a tap. Let go between two and four seconds, a rest; held to four, a
@@ -643,9 +643,9 @@ mod tests {
         let skill = cfg.bindings.skill("a").unwrap_or_default().to_owned();
         assert!(
             skill.is_empty()
-                || out.contains(&Out::Request(proto::Call::RobotDo(proto::DoParams {
+                || out.contains(&Out::Request(proto::Call::RobotDo(proto::DoParams::new(
                     skill
-                }))),
+                )))),
             "{out:?}"
         );
 

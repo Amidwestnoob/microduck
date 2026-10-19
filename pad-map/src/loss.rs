@@ -120,9 +120,7 @@ pub fn sound(tag: proto::SoundTag) -> proto::Call {
 /// The sit itself. Asked only after [`already_sitting`] says no: `sit_toggle` stands a seated
 /// robot up, and a pad dropping out next to a sitting robot must not do that.
 pub fn sit_call() -> proto::Call {
-    proto::Call::RobotDo(proto::DoParams {
-        skill: "sit_toggle".to_owned(),
-    })
+    proto::Call::RobotDo(proto::DoParams::new("sit_toggle".to_owned()))
 }
 
 /// Whether `robot.policies` says the robot is sitting already, so there is nothing to do.

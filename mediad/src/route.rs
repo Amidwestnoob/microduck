@@ -489,9 +489,7 @@ mod tests {
     fn a_watching_peer_can_run_a_skill_and_change_a_policy() {
         for call in [
             proto::Call::RobotPolicies,
-            proto::Call::RobotDo(proto::DoParams {
-                skill: "polite-bow".to_owned(),
-            }),
+            proto::Call::RobotDo(proto::DoParams::new("polite-bow".to_owned())),
             proto::Call::RobotLoadPolicy(proto::LoadPolicyParams {
                 slot: Some("walk".to_owned()),
                 path: Some("/opt/robot/policies/current/alpha_walking.onnx".to_owned()),

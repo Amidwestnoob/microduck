@@ -53,6 +53,8 @@ ratatui = { version = "0.30.2", default-features = false, features = [
 # the robot's synth — the crate the robot renders its bank with, so the two sound like one kind of
 # duck. Pure Rust; the output is per-platform, below.
 sounds = { path = "../sounds" }
+# The emotions' sounds are wavs, embedded from `robotd/emotions/` by `build.rs` and decoded once.
+hound.workspace = true
 
 # `btleplug` rather than `bluer`, because this runs on a developer's machine: CoreBluetooth on
 # macOS, BlueZ on Linux, WinRT on Windows. `bluer` would make the client Linux-only, which defeats

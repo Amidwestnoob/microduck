@@ -4960,6 +4960,7 @@ mod tests {
             imu: None,
             frames: None,
             skeleton: Vec::new(),
+            emotion: None,
         }
     }
 }
