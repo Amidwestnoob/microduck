@@ -10,7 +10,9 @@
 //! several instances on one laptop each drive their own duck with their own pad (`claim.rs`).
 //!
 //! The quack and the wheee play from this laptop, in a voice of its own (`voice.rs`), and the
-//! duck only opens its mouth for them (`wire::SENDER_SOUNDS`) unless `--robot-sound-on`.
+//! duck only opens its mouth for them (`wire::SENDER_SOUNDS`) unless `--robot-sound-on`. The
+//! emotions the buttons start go the same way: the duck moves, and their sound plays here when
+//! its report says one started.
 
 use std::hash::{BuildHasher, Hasher};
 use std::net::UdpSocket;
@@ -374,6 +376,8 @@ pub fn run(
     let mut last_input = None::<(GamepadId, Instant)>;
     // The robot as `netpadd` last reported it, and when that report landed.
     let mut robot = None::<(RobotReport, Instant)>;
+    // The start of the emotion last heard of, so each plays its sound once.
+    let mut emotion_heard = None::<f64>;
     let mut screen = Screen::open();
     let mut shown = None::<Instant>;
     let say = |screen: &mut Option<Screen>, line: String| match screen {
@@ -412,7 +416,8 @@ pub fn run(
     if voice.is_none() && !robot_sound {
         say(
             &mut screen,
-            "the triggers make no sound anywhere — --robot-sound-on for the duck's".to_owned(),
+            "the triggers and the emotions make no sound anywhere — --robot-sound-on for the duck's"
+                .to_owned(),
         );
     }
     let flags = if robot_sound {
@@ -473,6 +478,24 @@ pub fn run(
                     for line in notices.robot(&r, at) {
                         say(&mut screen, line);
                     }
+                    let emotion = r.posture.as_ref().and_then(|p| p.emotion.as_ref());
+                    if let Some(v) = &voice {
+                        match emotion {
+                            // Only one the duck plays without its sound: with --robot-sound-on,
+                            // or started by another client, the duck has it.
+                            Some(e) if e.quiet && emotion_heard != Some(e.since) => {
+                                if !v.emotion(&e.name) {
+                                    say(
+                                        &mut screen,
+                                        format!("{}: no sound for it in this duckctl", e.name),
+                                    );
+                                }
+                            }
+                            None if emotion_heard.is_some() => v.emotion_over(),
+                            _ => {}
+                        }
+                    }
+                    emotion_heard = emotion.map(|e| e.since);
                     robot = Some((*r, at));
                 }
                 Heard::Failed(std::io::ErrorKind::ConnectionRefused) => {

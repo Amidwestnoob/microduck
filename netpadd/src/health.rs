@@ -21,9 +21,10 @@ use crate::robotd::Robotd;
 /// How often `robot.health` is asked: as often as the report goes out.
 const HEALTH_EVERY: Duration = pad_map::wire::REPORT_EVERY;
 
-/// The rate `robot.state` is subscribed at. Posture changes on a human timescale; a fall is seen
-/// within half a second.
-const STATE_HZ: u32 = 2;
+/// The rate `robot.state` is subscribed at. Posture changes on a human timescale, but an emotion
+/// starting is a sound the sender plays (`Posture::emotion`), and every period here is that much
+/// late.
+const STATE_HZ: u32 = 25;
 
 /// No `robot.state` for this long is a stream that stopped.
 const STATE_SILENT: Duration = Duration::from_secs(3);
@@ -147,6 +148,9 @@ fn posture(line: &str) -> Option<Posture> {
         fallen: flag("fallen"),
         limp: flag("limp"),
         picked_up: flag("picked_up"),
+        emotion: state
+            .get("emotion")
+            .and_then(|e| serde_json::from_value(e.clone()).ok()),
     })
 }
 
@@ -165,6 +169,14 @@ mod tests {
             p.fallen && !p.limp && !p.picked_up,
             "absent picked_up is false"
         );
+        assert_eq!(p.emotion, None, "absent is none playing");
+        let playing = r#"{"jsonrpc":"2.0","method":"robot.state","params":{"policy":"stand",
+            "safety":{},"emotion":{"name":"yes","since":3.25,"quiet":true}}}"#
+            .replace('\n', "");
+        let e = posture(&playing)
+            .and_then(|p| p.emotion)
+            .expect("an emotion");
+        assert_eq!((e.name.as_str(), e.since, e.quiet), ("yes", 3.25, true));
         assert_eq!(posture(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#), None);
         assert_eq!(posture("not json"), None);
     }

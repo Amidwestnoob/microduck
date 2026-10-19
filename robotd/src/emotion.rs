@@ -255,6 +255,10 @@ impl Library {
 #[derive(Debug)]
 pub struct Playing {
     pub name: String,
+    /// Its sound is the client's (`robot.do`'s `quiet`), so the robot plays none.
+    pub quiet: bool,
+    /// When it started on the state stream's clock, for [`duck_ipc_proto::EmotionState`].
+    pub since_t: f64,
     emotion: Arc<Emotion>,
     since: Instant,
     /// The sit has been dealt with, so it is asked for once.
@@ -265,6 +269,8 @@ impl Playing {
     pub fn start(name: &str, emotion: Arc<Emotion>, now: Instant) -> Self {
         Self {
             name: name.to_owned(),
+            quiet: false,
+            since_t: 0.0,
             emotion,
             since: now,
             sat: false,

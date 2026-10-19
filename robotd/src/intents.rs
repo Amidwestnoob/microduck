@@ -37,6 +37,9 @@ const POWER_RELAX: u8 = 2;
 
 /// "No emotion pending" in [`Intents::emotion`].
 const EMOTION_NONE: u32 = u32::MAX;
+/// The pending emotion was asked for `quiet` — its sound left to the client. The top bit, which
+/// no library index reaches.
+const EMOTION_QUIET: u32 = 1 << 30;
 use std::time::{Duration, Instant};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -175,8 +178,9 @@ pub struct Intents {
     /// Pending skill requests, a bitmask taken (swapped to zero) once per tick. A mask
     /// rather than one slot so two different buttons in the same tick both arrive.
     skills: std::sync::atomic::AtomicU32,
-    /// A pending emotion, by its index in the loaded library, or [`EMOTION_NONE`]. The last
-    /// request wins, as with the mode switch.
+    /// A pending emotion, by its index in the loaded library with [`EMOTION_QUIET`] when its
+    /// sound is the client's, or [`EMOTION_NONE`]. The last request wins, as with the mode
+    /// switch.
     emotion: std::sync::atomic::AtomicU32,
     /// A shutdown was requested. A level, not an edge: once asked, the sequence runs.
     shutdown: AtomicBool,
@@ -361,20 +365,24 @@ impl Intents {
         );
     }
 
-    /// Queue an emotion by its index in the loaded library — see `emotion`.
-    pub fn request_emotion(&self, index: usize) {
-        self.emotion
-            .store(index as u32, std::sync::atomic::Ordering::Relaxed);
+    /// Queue an emotion by its index in the loaded library — see `emotion`. `quiet` leaves its
+    /// sound to the client (`robot.do`'s `quiet`).
+    pub fn request_emotion(&self, index: usize, quiet: bool) {
+        let quiet = if quiet { EMOTION_QUIET } else { 0 };
+        self.emotion.store(
+            (index as u32 & !EMOTION_QUIET) | quiet,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
-    /// Take the pending emotion, if any.
-    pub fn take_emotion(&self) -> Option<usize> {
+    /// Take the pending emotion, if any: its index, and whether it is to be quiet.
+    pub fn take_emotion(&self) -> Option<(usize, bool)> {
         match self
             .emotion
             .swap(EMOTION_NONE, std::sync::atomic::Ordering::Relaxed)
         {
             EMOTION_NONE => None,
-            index => Some(index as usize),
+            bits => Some(((bits & !EMOTION_QUIET) as usize, bits & EMOTION_QUIET != 0)),
         }
     }
 

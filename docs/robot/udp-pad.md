@@ -103,7 +103,9 @@ selected, and the duck only opens its mouth for them. `--robot-sound-on` has the
 wheee as well. It is bit 0 of the datagram's `flags` ([below](#writing-your-own-sender)); a
 `netpadd` from before that bit ignores it, and the duck quacks either way until it is updated. The
 duck's other sounds — asking where the pad went, and the greeting when it is back — are its own
-and always play. The laptop's follow the duck's rules: a quack cuts the one still
+and always play. The emotions on the pad's buttons go the same way: the duck moves and the laptop
+plays the sound, the moment the duck reports it started — a press while another plays, or on a
+robot that is not standing, starts nothing and plays nothing. The laptop's follow the duck's rules: a quack cuts the one still
 playing, a quack during a ride is dropped, and the wheee loops while LT is held and stops when it
 is let go. The laptop plays them for the pad it sends, whether or not the duck is taking it.
 
@@ -203,7 +205,7 @@ One datagram carries the whole state. Every field is little-endian, and the pack
 |---|---|---|---|
 | 0 | 4 | magic | `b"DKPD"` |
 | 4 | 1 | version | `1` |
-| 5 | 1 | flags | bit 0: the sender plays the triggers' sounds itself — the robot opens its mouth for RT and LT but plays no quack and no wheee. Bits 1 to 7 reserved: send 0, the receiver ignores them |
+| 5 | 1 | flags | bit 0: the sender plays the triggers' sounds itself — the robot opens its mouth for RT and LT but plays no quack and no wheee, and the emotions the buttons start play without their sound (`posture.emotion` with `quiet` says when one starts). Bits 1 to 7 reserved: send 0, the receiver ignores them |
 | 6 | 4 | seq | u32, +1 per datagram, wraps |
 | 10 | 4 | t_ms | u32, the sender's own clock in ms, starting anywhere; how late a datagram arrived is read from it. `0` means none, and nothing is checked |
 | 14 | 12 | axes | i16 ×6: lx ly rx ry (±32767 maps to ±1, up is positive), lt rt (0..32767 maps to 0..1) |
@@ -298,7 +300,7 @@ and absent means *not known*, never zero:
 |---|---|
 | `health` | `robot.health` as `robotd` answered it: `healthy`, `degraded`, `reason`, `battery`, `motors`, `cpu_temp_c`, `cpu_throttle`, `control_loop`, `bus`, `imu` |
 | `health_error` | why there is no `health` — `robotd` not answering |
-| `posture` | `policy`, `fallen`, `limp`, `picked_up`, from `robot.state` |
+| `posture` | `policy`, `fallen`, `limp`, `picked_up`, and `emotion` while one plays (`name`, `since`, `quiet`), from `robot.state`. A report goes out at once when an emotion starts |
 | `posture_error` | why there is no `posture` |
 | `refused` | the last pad request the robot did not carry out in the past 30 s: `method`, `reason`, `ago_ms` |
 

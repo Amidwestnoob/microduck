@@ -25,8 +25,10 @@ pub const TOS: u32 = 46 << 2;
 const FULL: f64 = 32767.0;
 
 /// `flags` bit 0: the sender plays the triggers' sounds itself, so the robot keeps quiet. RT and
-/// LT still open the mouth — only the quack and the wheee are not played. `duckctl udp-pad` sets
-/// it unless `--robot-sound-on`, since the laptop quacks for it.
+/// LT still open the mouth — only the quack and the wheee are not played — and the emotions its
+/// buttons start play without their sound on the robot (`robot.do`'s `quiet`); the sender hears
+/// them start in [`Posture::emotion`]. `duckctl udp-pad` sets it unless `--robot-sound-on`, since
+/// the laptop speaks for it.
 pub const SENDER_SOUNDS: u8 = 1 << 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -292,6 +294,10 @@ pub struct Posture {
     pub fallen: bool,
     pub limp: bool,
     pub picked_up: bool,
+    /// The emotion playing, if one is. A report goes out the moment one starts, rather than at
+    /// the next second, so a sender playing its sound is not late with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emotion: Option<proto::EmotionState>,
 }
 
 /// A request from the pad the robot did not carry out, and its reason.
@@ -405,6 +411,11 @@ mod tests {
                 fallen: true,
                 limp: true,
                 picked_up: false,
+                emotion: Some(proto::EmotionState {
+                    name: "yes".to_owned(),
+                    since: 12.5,
+                    quiet: true,
+                }),
             }),
             refused: Some(Refusal {
                 method: "robot.do".to_owned(),
