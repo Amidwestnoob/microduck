@@ -2426,7 +2426,7 @@ impl Default for Control {
         Self {
             hz: 50,
             cmd_alpha: 0.2,
-            head_alpha: 0.2,
+            head_alpha: 0.05,
             publish_velocity_and_load: true,
         }
     }
@@ -4199,12 +4199,13 @@ mod tests {
         assert_eq!(name(&p.roulade).as_deref(), Some("roulade.onnx"));
     }
 
-    /// Command smoothing matches the prototype's `--cmd-alpha` / `--head-alpha`.
+    /// Twist smoothing matches the prototype's `--cmd-alpha`; head smoothing is heavier than
+    /// its `--head-alpha` (0.2).
     #[test]
     fn command_smoothing_defaults_match_the_prototype() {
         let c = Control::default();
         assert_eq!(c.cmd_alpha, 0.2);
-        assert_eq!(c.head_alpha, 0.2);
+        assert_eq!(c.head_alpha, 0.05);
     }
 
     /// One line — `mode = "roller"` — must reproduce the prototype's whole roller preset,
