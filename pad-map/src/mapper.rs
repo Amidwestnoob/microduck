@@ -282,6 +282,17 @@ impl Mapper {
                 for call in mode_exit_calls(self.mode, next) {
                     out.push(Out::Notify(call));
                 }
+                // Out of rest by any other arrow: the policy back on, so the arrow lands in a
+                // mode that drives, as it does from every other one.
+                if self.mode == Mode::Rest {
+                    tracing::warn!("leaving rest — policy on");
+                    out.push(Out::Request(proto::Call::RobotEnable(
+                        proto::EnableParams {
+                            on: true,
+                            toggle: false,
+                        },
+                    )));
+                }
                 self.mode = next;
                 tracing::info!(mode = ?self.mode, "mode");
             }
@@ -794,6 +805,32 @@ mod tests {
         m.tick(&pad, &cfg, t, &mut out, &mut frame);
         assert!(!out.contains(&init), "only the press goes home: {out:?}");
         assert!(frame.iter().any(|c| matches!(c, proto::Call::RobotHead(_))));
+    }
+
+    /// Any other arrow out of rest turns the policy back on, as it lands in a driving mode from
+    /// any other one; re-pressing it once driving sends nothing.
+    #[test]
+    fn any_arrow_out_of_rest_turns_the_policy_back_on() {
+        let enable = Out::Request(proto::Call::RobotEnable(proto::EnableParams {
+            on: true,
+            toggle: false,
+        }));
+        let press = |m: &mut Mapper, b: Buttons| {
+            let (mut out, mut frame) = (Vec::new(), Vec::new());
+            let pad = PadFrame {
+                pressed: b,
+                held: b,
+                ..Default::default()
+            };
+            m.tick(&pad, &cfg(), Instant::now(), &mut out, &mut frame);
+            out
+        };
+        for arrow in [Buttons::LEFT, Buttons::RIGHT, Buttons::UP] {
+            let mut m = Mapper::new();
+            press(&mut m, Buttons::DOWN);
+            assert!(press(&mut m, arrow).contains(&enable), "{arrow:?}");
+            assert!(!press(&mut m, arrow).contains(&enable), "already driving");
+        }
     }
 
     fn sticks(left_x: f64, left_y: f64, right_x: f64, right_y: f64) -> Sticks {

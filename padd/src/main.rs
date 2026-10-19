@@ -35,7 +35,8 @@
 //! D-pad up        head mode — the sticks pose the head, the body holds still
 //! D-pad right     head + move — left stick walks and turns, right stick looks around
 //! D-pad left      move — the sticks walk, strafe and turn
-//! D-pad down      rest + head — policy off, home pose (or the seat) stiff; the sticks pose the head
+//! D-pad down      rest + head — policy off, home pose (or the seat) stiff; the sticks pose the head.
+//!                 Any other arrow from here turns the policy back on
 //! Home            flashlight on / off (a board with one)
 //! Start           first press stands up, then toggles the policy
 //! Start, 1.5 s    home pose, motors stiff, policy off — a seated robot stays seated
