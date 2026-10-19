@@ -582,7 +582,7 @@ pub const REGISTRY: &[Entry] = &[
     entry(
         "emotions.dir",
         Kind::Text,
-        "Emotions robot.do plays: <name>.json keyframes and <name>.wav",
+        "Your own emotions, on top of the shipped set: <name>.json + <name>.wav",
     ),
     // ── [media] ──────────────────────────────────────────────────────────────
     feature(
