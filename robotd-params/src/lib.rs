@@ -202,9 +202,11 @@ impl Default for PadImuHeadControlParams {
 /// needs. It would also put "the button that stops the robot" behind a config key, which is the
 /// one binding worth not being able to lose.
 ///
-/// The defaults keep the pad sparse on purpose: A sits or stands, B picks up, the bumpers kick,
-/// and X and Y do nothing until somebody puts a skill there. A named button is rebound; the rest
-/// stay as they were.
+/// The defaults: A sits or stands, B picks up, and the other four play emotions (`emotion.rs`) —
+/// the bumpers nod yes and shake no, Y is excited, X is devastated. The kicks have no button by
+/// default; `pad bind lb kick_left` puts one back. An emotion whose files are not in `[emotions]
+/// dir` is a skill the robot does not have, so its button does nothing. A named button is
+/// rebound; the rest stay as they were.
 ///
 /// A name here is not checked against anything at parse time: which skills exist is a property of
 /// the robot, and `padd` learns it from `robot.subscribe`. An unknown name is refused by `robotd`
@@ -216,15 +218,16 @@ pub struct PadParams {
     pub a: String,
     /// B (East). The ground pick, by default.
     pub b: String,
-    /// X (West). Free by default. Held, it is re-sent every tick, so a chaining skill such as
-    /// the roulade keeps going for as long as it is held.
+    /// X (West). The devastated emotion, by default. Held, it is re-sent every tick, so a
+    /// chaining skill such as the roulade keeps going for as long as it is held.
     pub x: String,
-    /// Y (North). Free by default.
+    /// Y (North). The excited emotion, by default.
     pub y: String,
     /// The left bumper — `LeftTrigger` in gilrs, which names the *analog* trigger
-    /// `LeftTrigger2`. Getting that backwards binds a skill to a control nobody presses.
+    /// `LeftTrigger2`. Getting that backwards binds a skill to a control nobody presses. The yes
+    /// emotion, by default.
     pub lb: String,
-    /// The right bumper, likewise.
+    /// The right bumper, likewise. The no emotion, by default.
     pub rb: String,
 }
 
@@ -233,10 +236,10 @@ impl Default for PadParams {
         Self {
             a: "sit_toggle".to_owned(),
             b: "ground_pick".to_owned(),
-            x: String::new(),
-            y: String::new(),
-            lb: "kick_left".to_owned(),
-            rb: "kick_right".to_owned(),
+            x: "devastated".to_owned(),
+            y: "excited".to_owned(),
+            lb: "yes".to_owned(),
+            rb: "no".to_owned(),
         }
     }
 }
@@ -2779,16 +2782,16 @@ mod tests {
         );
     }
 
-    /// The shipped mapping: A sits, B picks up, the bumpers kick, X and Y are free.
+    /// The shipped mapping: A sits, B picks up, the other four play emotions.
     #[test]
     fn the_default_bindings() {
         let pad = super::PadParams::default();
         assert_eq!(pad.a, "sit_toggle");
         assert_eq!(pad.b, "ground_pick");
-        assert_eq!(pad.x, "");
-        assert_eq!(pad.y, "");
-        assert_eq!(pad.lb, "kick_left");
-        assert_eq!(pad.rb, "kick_right");
+        assert_eq!(pad.x, "devastated");
+        assert_eq!(pad.y, "excited");
+        assert_eq!(pad.lb, "yes");
+        assert_eq!(pad.rb, "no");
     }
 
     /// **The D-pad stopped being bindable, and a robot still carrying the old key boots.** It is
@@ -2801,13 +2804,13 @@ mod tests {
     }
 
     /// Binding one button leaves the rest alone — the file is a list of decisions, and rebinding
-    /// X must not silently take the kicks off the bumpers.
+    /// X must not silently take the emotions off the bumpers.
     #[test]
     fn binding_one_button_leaves_the_others() {
         let params: super::Params =
             toml::from_str("[pad]\nx = \"polite-bow\"\n").expect("a pad section");
         assert_eq!(params.pad.x, "polite-bow");
-        assert_eq!(params.pad.lb, "kick_left", "untouched");
+        assert_eq!(params.pad.lb, "yes", "untouched");
         assert_eq!(params.pad.a, "sit_toggle", "untouched");
     }
 

@@ -1014,10 +1014,7 @@ mod tests {
 
         let bindings = super::pad_bindings(&path).unwrap();
         assert_eq!(bindings.x, "polite-bow");
-        assert_eq!(
-            bindings.lb, "kick_left",
-            "the rest resolve to their defaults"
-        );
+        assert_eq!(bindings.lb, "yes", "the rest resolve to their defaults");
     }
 
     /// Binding a button back to its default *removes* the key rather than pinning it, so the
@@ -1028,14 +1025,14 @@ mod tests {
         let path = dir.path().join("robotd.toml");
         std::fs::write(&path, "[pad]\nlb = \"polite-bow\"\n").unwrap();
 
-        super::bind_pad(&path, "lb", "kick_left").unwrap();
+        super::bind_pad(&path, "lb", "yes").unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("polite-bow"), "{written}");
         assert!(
             !written.contains("lb ="),
             "the default is not pinned: {written}"
         );
-        assert_eq!(super::pad_bindings(&path).unwrap().lb, "kick_left");
+        assert_eq!(super::pad_bindings(&path).unwrap().lb, "yes");
     }
 
     /// **Resetting a button clears it back to the default and leaves the file clean.** The undo
