@@ -35,7 +35,7 @@
 //! D-pad up        head mode — the sticks pose the head, the body holds still
 //! D-pad right     head + move — left stick walks and turns, right stick looks around
 //! D-pad left      move — the sticks walk, strafe and turn
-//! D-pad down      body + head — left stick crouches and leans sideways, right stick looks around
+//! D-pad down      rest + head — policy off, home pose (or the seat) stiff; the sticks pose the head
 //! Home            flashlight on / off (a board with one)
 //! Start           first press stands up, then toggles the policy
 //! Start, 1.5 s    home pose, motors stiff, policy off — a seated robot stays seated
@@ -44,9 +44,9 @@
 //! ```
 //!
 //! The D-pad *selects* a mode rather than toggling one, so a press always lands where its arrow
-//! says whatever mode the robot was in. Head and body + head mode both zero the velocity while
+//! says whatever mode the robot was in. Head and rest + head mode both zero the velocity while
 //! active — a robot that keeps walking because you started posing its head is a bad surprise —
-//! and leaving a mode puts back what it moved: the body snaps to nominal, the head re-centres.
+//! and leaving a mode for plain driving re-centres the head.
 //!
 //! Smoothing lives in `robotd` (`[control] cmd_alpha` / `head_alpha`), not here: this
 //! process sends raw targets, so every client gets the same feel.
@@ -299,7 +299,7 @@ fn main() -> std::process::ExitCode {
         hz = args.hz,
         roller,
         "driving — A sit, B ground pick, triggers mouth; D-pad up head, \
-         right head + move, left move, down body + head; Start stands up then toggles the policy, \
+         right head + move, left move, down rest + head; Start stands up then toggles the policy, \
          Start (1.5s) home pose; Select (2-4s) rest, Select (4s) power off"
     );
 

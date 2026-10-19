@@ -51,7 +51,7 @@ use duck_ipc_proto as proto;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-use control::{Controller, Driving, SkillTuning, Tuning};
+use control::{Controller, Driving, HEAD_JOINTS, SkillTuning, Tuning};
 use intents::Intents;
 use params::{Mode, Params, Slot};
 
@@ -1681,6 +1681,25 @@ impl Bringup {
         }
         Some(target)
     }
+}
+
+/// Whether a held robot's head follows the head command: torque on and nothing ramping, and the
+/// hold deliberate — the policy switched off (Start, Start held, the pad's D-pad down), or the
+/// home pose or the seat. A pose frozen by a fault while the policy is still on keeps every joint
+/// where it is.
+fn hold_poses_head(bringup: Bringup, enabled: bool, hold: &[f64; NUM_JOINTS]) -> bool {
+    bringup == Bringup::Ready && (!enabled || *hold == DEFAULT_POSITION || *hold == SEAT_POSITION)
+}
+
+/// `hold` with the head posed by `head`. The command is an offset from the home pose's head — the
+/// seat's head is the same — which is what the policy is handed, so Start picks the head up where
+/// it already is and the hold does not snap it when the policy lets go.
+fn held_head(hold: [f64; NUM_JOINTS], head: [f64; 4]) -> [f64; NUM_JOINTS] {
+    let mut targets = hold;
+    for (i, offset) in head.iter().enumerate() {
+        targets[HEAD_JOINTS.start + i] = DEFAULT_POSITION[HEAD_JOINTS.start + i] + offset;
+    }
+    targets
 }
 
 /// The shutdown's ramp from the seat to the rest pose — see [`REST_RAMP`].
@@ -3665,6 +3684,14 @@ async fn control_loop<T: RobotIo>(
                 policy_cfg.gain,
                 true,
                 "homing".into(),
+            ),
+            // Held with the policy off — standing at home or sitting — the head still answers:
+            // see `held_head`.
+            _ if hold_poses_head(bringup, snapshot.enabled, &hold) => (
+                held_head(hold, command.head),
+                policy_cfg.gain,
+                false,
+                "held".into(),
             ),
             _ => (hold, policy_cfg.gain, false, "held".into()),
         };
@@ -9506,6 +9533,84 @@ mod tests {
             "commanded {} outside the ramp {from}..{to}",
             written[0]
         );
+    }
+
+    /// **Held at home, the head still answers** — the pad's D-pad down is this: the policy off,
+    /// the robot at its home pose, and the sticks posing the head. The offset lands on the head
+    /// joints only; every other joint keeps the home pose.
+    #[tokio::test]
+    async fn held_at_home_the_head_follows_the_command() {
+        let io = FakeIo::at(DEFAULT_POSITION).frozen();
+        let mut params = Params::default();
+        params.policy.enabled = false;
+        let s = Arc::new(RobotState::new(
+            &params,
+            std::path::Path::new("/test/robotd.toml"),
+            false,
+            false,
+        ));
+        let intents = Arc::new(Intents::new());
+        intents.request_init();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = tokio::spawn({
+            let s = Arc::clone(&s);
+            let intents = Arc::clone(&intents);
+            async move {
+                let mut io = io;
+                control_loop_probe_with(&mut io, s, intents, Duration::from_millis(2)).await;
+                tx.send(io.last_written).unwrap();
+            }
+        });
+        until(
+            || s.homed.load(Ordering::Relaxed),
+            HOME_RAMP + Duration::from_secs(2),
+            "never reached home",
+        )
+        .await;
+
+        let head = [0.1, -0.2, 0.3, -0.1];
+        intents.set_head(head);
+        // Long enough for the head's slew to settle at a 2 ms tick.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        s.shutdown.store(true, Ordering::Relaxed);
+        handle.await.unwrap();
+
+        let written = rx.recv().unwrap().expect("the loop must command something");
+        for (i, (got, home)) in written.positions.iter().zip(DEFAULT_POSITION).enumerate() {
+            let want = if HEAD_JOINTS.contains(&i) {
+                home + head[i - HEAD_JOINTS.start]
+            } else {
+                home
+            };
+            assert!((got - want).abs() < 1e-3, "joint {i}: {got}, want {want}");
+        }
+    }
+
+    /// Sitting with the policy off, the head moves too, on the same offset from the home head the
+    /// seat shares; the legs keep the seat. A pose frozen with the policy still on, or a robot not
+    /// yet up, keeps every joint.
+    #[test]
+    fn a_seated_hold_poses_the_head_and_a_frozen_one_does_not() {
+        let mut seat = SEAT_POSITION;
+        seat[3] += 0.05; // measured, not the constant: where a stop finds a seated robot
+        assert!(hold_poses_head(Bringup::Ready, false, &seat));
+        assert!(hold_poses_head(Bringup::Ready, true, &SEAT_POSITION));
+        assert!(
+            !hold_poses_head(Bringup::Ready, true, &seat),
+            "frozen by a fault"
+        );
+        assert!(!hold_poses_head(Bringup::Limp, false, &SEAT_POSITION));
+
+        let head = [0.1, -0.2, 0.3, -0.1];
+        let posed = held_head(seat, head);
+        for i in 0..NUM_JOINTS {
+            let want = if HEAD_JOINTS.contains(&i) {
+                DEFAULT_POSITION[i] + head[i - HEAD_JOINTS.start]
+            } else {
+                seat[i]
+            };
+            assert_eq!(posed[i], want, "joint {i}");
+        }
     }
 
     /// **`robot.relax` cuts power and goes back to the start**, so the next bring-up ramps from

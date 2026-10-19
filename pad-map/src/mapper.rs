@@ -21,32 +21,26 @@ enum Mode {
     /// `[pad_imu_head_control]` on a pad that has an IMU, the pad's tilt poses the head and the
     /// sticks keep the whole [`Mode::Drive`] mapping.
     HeadDrive,
-    /// D-pad down. Body + head: the left stick crouches and leans the standing robot sideways,
-    /// the right stick looks around. The body does not walk.
-    BodyPose,
+    /// D-pad down. The policy off and the robot at its home pose with the motors stiff — Start
+    /// held's way home; a seated robot stays seated — while all four axes go on posing the head.
+    /// Start drives again from there.
+    Rest,
 }
 
 impl Mode {
     /// Whether this mode sends head poses, so leaving it has a head to put back.
     fn poses_head(self) -> bool {
-        matches!(self, Self::Head | Self::HeadDrive | Self::BodyPose)
+        matches!(self, Self::Head | Self::HeadDrive | Self::Rest)
     }
 }
 
 /// What has to be sent when the sticks stop meaning `from` and start meaning `to`.
 ///
-/// Leaving a mode puts back what it moved, because nothing else will: a body left leaning or a
-/// head left turned stays that way, and the next mode does not send the joints the last one did.
-/// Moving between modes that all pose the head keeps the head, since the next one goes on posing
-/// it.
+/// Leaving a mode puts back what it moved, because nothing else will: a head left turned stays
+/// that way, and the next mode does not send the joints the last one did. Moving between modes
+/// that all pose the head keeps the head, since the next one goes on posing it.
 fn mode_exit_calls(from: Mode, to: Mode) -> Vec<proto::Call> {
     let mut calls = Vec::new();
-    if from == Mode::BodyPose && to != Mode::BodyPose {
-        calls.push(proto::Call::RobotPose(proto::PoseParams {
-            active: false,
-            ..Default::default()
-        }));
-    }
     if from.poses_head() && !to.poses_head() {
         calls.push(proto::Call::RobotHead(proto::HeadParams::default()));
     }
@@ -77,6 +71,18 @@ fn head_from_pad(
         head_yaw: angle(yaw, limits.head_yaw_max),
         head_roll: -angle(roll, limits.head_roll_max),
     }
+}
+
+/// The way home: the policy off, then the robot ramped to its home pose with torque on — from
+/// limp, from mid-walk or from a crouch alike. The disable comes first so the policy cannot pick
+/// the robot up again the moment the ramp ends, which is what `robot.init` alone does on a robot
+/// that is driving.
+fn home_calls() -> [proto::Call; 2] {
+    let disable = proto::Call::RobotEnable(proto::EnableParams {
+        on: false,
+        toggle: false,
+    });
+    [disable, proto::Call::RobotInit]
 }
 
 /// One instant of a pad, from whichever daemon read it. Sticks are raw — the deadzone is
@@ -211,7 +217,7 @@ impl Mapper {
             (Buttons::UP, Mode::Head),
             (Buttons::RIGHT, Mode::HeadDrive),
             (Buttons::LEFT, Mode::Drive),
-            (Buttons::DOWN, Mode::BodyPose),
+            (Buttons::DOWN, Mode::Rest),
         ] {
             if pad.pressed.contains(button) {
                 wanted_mode = Some(mode);
@@ -260,23 +266,14 @@ impl Mapper {
         }
 
         if go_home {
-            // Everything back: the sticks to plain driving, the policy off, and the robot ramped
-            // to its home pose with torque on — from limp, from mid-walk or from a crouch alike.
-            // The disable comes first so the policy cannot pick the robot up again the moment the
-            // ramp ends, which is what `robot.init` alone does on a robot that is driving.
+            // Everything back: the sticks to plain driving, and the robot home (`home_calls`).
             tracing::warn!("Start held — home pose, motors stiff, policy off");
             for call in mode_exit_calls(self.mode, Mode::Drive) {
                 out.push(Out::Notify(call));
             }
             self.mode = Mode::Drive;
             self.imu_reference = None;
-            let disable = proto::Call::RobotEnable(proto::EnableParams {
-                on: false,
-                toggle: false,
-            });
-            for call in [disable, proto::Call::RobotInit] {
-                out.push(Out::Request(call));
-            }
+            out.extend(home_calls().map(Out::Request));
             self.up = true;
         }
 
@@ -287,6 +284,15 @@ impl Mapper {
                 }
                 self.mode = next;
                 tracing::info!(mode = ?self.mode, "mode");
+            }
+            if self.mode == Mode::Rest {
+                // Start held's way home, on every press — a second one after Start drove again
+                // stops it again. The head stays the sticks': robotd poses it on the held home pose.
+                tracing::warn!(
+                    "D-pad down — policy off, home pose or seat held stiff; sticks pose the head"
+                );
+                out.extend(home_calls().map(Out::Request));
+                self.up = true;
             }
             // Head + move follows the pad's IMU when it can, from wherever the pad is at the
             // press — and pressing it again re-centres, which is how a person beats the gyro's
@@ -500,7 +506,7 @@ fn stick_frame(
                 ));
             }
         },
-        Mode::Head => {
+        Mode::Head | Mode::Rest => {
             // The body must not keep its last velocity while the sticks are posing the
             // head. The deadman would catch it eventually; a robot that keeps walking
             // because you started moving its head is a bad enough surprise to be
@@ -511,22 +517,6 @@ fn stick_frame(
             // and two `flush` syscalls a tick to say so.
             frame.push(proto::Call::RobotMove(proto::MoveParams::default()));
             let a = &cfg.axes.head;
-            frame.push(look(
-                &a.neck_pitch,
-                &a.head_pitch,
-                &a.head_yaw,
-                &a.head_roll,
-            ));
-        }
-        Mode::BodyPose => {
-            frame.push(proto::Call::RobotMove(proto::MoveParams::default()));
-            let (a, body) = (&cfg.axes.body_pose, &cfg.body);
-            frame.push(proto::Call::RobotPose(proto::PoseParams {
-                z: scale(value(&a.z), body.z_min, body.z_max),
-                pitch: value(&a.pitch) * body.pitch_max,
-                roll: value(&a.roll) * body.roll_max,
-                active: true,
-            }));
             frame.push(look(
                 &a.neck_pitch,
                 &a.head_pitch,
@@ -747,43 +737,63 @@ mod tests {
         assert!((head.head_yaw - 0.5).abs() < 1e-6, "{head:?}");
     }
 
-    /// Leaving a mode puts back what it moved, and only that: body + head releases the body,
-    /// leaving every head-posing mode for plain driving re-centres the head, and moving between
-    /// head-posing modes keeps it.
+    /// Leaving a mode puts back what it moved, and only that: leaving every head-posing mode for
+    /// plain driving re-centres the head, and moving between head-posing modes keeps it.
     #[test]
     fn leaving_a_mode_puts_back_what_it_moved() {
-        let is_pose_off = |c: &proto::Call| matches!(c, proto::Call::RobotPose(p) if !p.active);
         let centre = proto::HeadParams::default();
         let is_head_centre =
             |c: &proto::Call| matches!(c, proto::Call::RobotHead(h) if *h == centre);
 
-        let calls = mode_exit_calls(Mode::BodyPose, Mode::Drive);
-        assert!(
-            calls.len() == 2 && is_pose_off(&calls[0]) && is_head_centre(&calls[1]),
-            "{calls:?}"
-        );
-        for to in [Mode::Head, Mode::HeadDrive] {
-            let calls = mode_exit_calls(Mode::BodyPose, to);
-            assert!(
-                calls.len() == 1 && is_pose_off(&calls[0]),
-                "→ {to:?}: {calls:?}"
-            );
-        }
-
-        for head in [Mode::Head, Mode::HeadDrive] {
+        for head in [Mode::Head, Mode::HeadDrive, Mode::Rest] {
             let calls = mode_exit_calls(head, Mode::Drive);
             assert!(
                 calls.len() == 1 && is_head_centre(&calls[0]),
                 "{head:?}: {calls:?}"
             );
-            assert!(mode_exit_calls(head, Mode::BodyPose).is_empty());
+            for to in [Mode::Head, Mode::HeadDrive, Mode::Rest] {
+                assert!(mode_exit_calls(head, to).is_empty(), "{head:?} → {to:?}");
+            }
+            assert!(mode_exit_calls(Mode::Drive, head).is_empty());
         }
+    }
 
-        assert!(mode_exit_calls(Mode::Head, Mode::HeadDrive).is_empty());
-        assert!(mode_exit_calls(Mode::HeadDrive, Mode::Head).is_empty());
-        assert!(mode_exit_calls(Mode::Drive, Mode::Head).is_empty());
-        assert!(mode_exit_calls(Mode::Drive, Mode::BodyPose).is_empty());
-        assert!(mode_exit_calls(Mode::BodyPose, Mode::BodyPose).is_empty());
+    /// D-pad down is Start held's way home — policy off, then `robot.init` — on every press, and
+    /// the sticks pose the head there with the body told to stand still.
+    #[test]
+    fn down_goes_home_and_leaves_the_head_on_the_sticks() {
+        let (mut m, cfg, t) = (Mapper::new(), cfg(), Instant::now());
+        let (mut out, mut frame) = (Vec::new(), Vec::new());
+        let disable = Out::Request(proto::Call::RobotEnable(proto::EnableParams {
+            on: false,
+            toggle: false,
+        }));
+        let init = Out::Request(proto::Call::RobotInit);
+
+        for _ in 0..2 {
+            let pad = PadFrame {
+                pressed: Buttons::DOWN,
+                held: Buttons::DOWN,
+                right_x: 1.0,
+                ..Default::default()
+            };
+            m.tick(&pad, &cfg, t, &mut out, &mut frame);
+            let at = |o: &Out| out.iter().position(|x| x == o);
+            assert!(at(&disable).unwrap() < at(&init).unwrap(), "{out:?}");
+            assert_eq!(
+                flat(&frame),
+                flat(&calls(Mode::Head, &cfg, sticks(0.0, 0.0, 1.0, 0.0)))
+            );
+        }
+        assert!(m.up, "the next Start drives rather than standing up again");
+
+        let pad = PadFrame {
+            right_x: 1.0,
+            ..Default::default()
+        };
+        m.tick(&pad, &cfg, t, &mut out, &mut frame);
+        assert!(!out.contains(&init), "only the press goes home: {out:?}");
+        assert!(frame.iter().any(|c| matches!(c, proto::Call::RobotHead(_))));
     }
 
     fn sticks(left_x: f64, left_y: f64, right_x: f64, right_y: f64) -> Sticks {
@@ -845,10 +855,6 @@ mod tests {
             (Mode::HeadDrive, sticks(0.0, 1.0, 0.0, 0.0), [vx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             (Mode::HeadDrive, sticks(0.0, 0.0, 1.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0]),
             (Mode::HeadDrive, sticks(0.0, 0.0, 0.0, 1.0), [0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0, 0.0]),
-            (Mode::BodyPose, sticks(1.0, 0.0, 0.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2618]),
-            (Mode::BodyPose, sticks(0.0, 1.0, 0.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.010, 0.0, 0.0]),
-            (Mode::BodyPose, sticks(0.0, 0.0, 1.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0]),
-            (Mode::BodyPose, sticks(0.0, 0.0, 0.0, 1.0), [0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0, 0.0]),
         ];
         for (mode, positive, expected) in cases {
             for direction in [1.0, -1.0] {
@@ -859,17 +865,9 @@ mod tests {
                     positive.right_y * direction,
                 );
                 let frame = calls(mode, &cfg, s);
-                let mut expected = expected.map(|v| v * direction);
-                // The crouch goes further down than the rise goes up.
-                if mode == Mode::BodyPose && direction < 0.0 && positive.left_y != 0.0 {
-                    expected[7] = -0.025;
-                }
+                let expected = expected.map(|v| v * direction);
                 assert_eq!(flat(&frame), expected, "{mode:?}, {s:?}");
-                let sent = match mode {
-                    Mode::Drive => 1,
-                    Mode::BodyPose => 3,
-                    _ => 2,
-                };
+                let sent = if mode == Mode::Drive { 1 } else { 2 };
                 assert_eq!(frame.len(), sent, "{mode:?}: {frame:?}");
             }
         }
@@ -928,11 +926,6 @@ mod tests {
         cfg.axes.head.head_yaw.gain = 0.5;
         let t = flat(&calls(Mode::Head, &cfg, sticks(0.0, 0.0, 0.0, 1.0)));
         assert_eq!(t[5], -0.35);
-
-        cfg.body.pitch_max = 0.2;
-        cfg.axes.body_pose.pitch.source = AxisSource::RightX;
-        let t = flat(&calls(Mode::BodyPose, &cfg, sticks(0.0, 0.0, 1.0, 0.0)));
-        assert_eq!(t[8], 0.2);
 
         cfg.roller = true;
         cfg.roller_limits.vyaw_max = 0.1;
