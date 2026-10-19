@@ -3167,14 +3167,11 @@ async fn control_loop<T: RobotIo>(
             twist: twist_ema,
             // The chorale's sway rides on top of whatever the head was asked to do, computed
             // last tick (20 ms stale, invisible at sway speed) and slewed to zero when the
-            // singing stops so the head settles rather than snaps. The idle sweep rides the
-            // same way, and the two never overlap: singing is not still.
-            head: [
-                head_ema[0] + chorale_head[0] + idle_offset[0],
-                head_ema[1] + chorale_head[1] + idle_offset[1],
-                head_ema[2] + chorale_head[2] + idle_offset[2],
-                head_ema[3] + chorale_head[3] + idle_offset[3],
-            ],
+            // singing stops so the head settles rather than snaps. The idle look-around takes
+            // the head over instead, so it centres on the straight head and not on a pose the
+            // pad left parked; the two never overlap: singing is not still.
+            head: [0, 1, 2, 3]
+                .map(|i| head_ema[i] * (1.0 - idle.takeover) + chorale_head[i] + idle_offset[i]),
             body: BodyPose {
                 z: body_ema[0] + breath,
                 roll: body_ema[1],
