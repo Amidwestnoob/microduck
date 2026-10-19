@@ -41,7 +41,7 @@ use duck_control::obs::{ACTION_LEN, Command, Observation};
 use duck_control::policy::{Net, Policy, PolicyError};
 
 /// Joint indices the head low-pass covers: neck_pitch, head_pitch, head_yaw, head_roll.
-const HEAD_JOINTS: std::ops::Range<usize> = 5..9;
+pub(crate) const HEAD_JOINTS: std::ops::Range<usize> = 5..9;
 
 /// How recently a request must have arrived, at the end of a chaining skill's window, for
 /// another to start. The prototype chains roulade on "X still held at the window boundary";
