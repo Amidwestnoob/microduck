@@ -357,7 +357,7 @@ silently doing nothing when you press it.
 Six buttons are bindable: `a`, `b`, `x`, `y`, `lb`, `rb`. **`lb`/`rb` are the bumpers**, not
 the analog triggers, which are the mouth and the quack. An empty name switches a button off, and
 `pad reset <button>` puts one back. The four other buttons ship with emotions (below): L yes, R
-no, Y excited, X devastated. The kicks have no button by default (`sudo robotctl pad bind lb
+no, Y excited, X curious. The kicks have no button by default (`sudo robotctl pad bind lb
 kick_left` gives them one). X re-sends while held, which is what a chaining skill like the roulade
 wants.
 
@@ -638,8 +638,8 @@ the thumb:
 | --- | --- |
 | **A** / cross | sit ↔ stand |
 | **B** / circle | ground pick |
-| **LB** / **RB** | emotions: yes / no (needs the emotion files — see Emotions; rebind with `robotctl pad bind`) |
-| **Y** / **X** | emotions: excited / devastated (devastated sits the robot down) |
+| **LB** / **RB** | emotions: yes / no (rebind any of these four with `robotctl pad bind`) |
+| **Y** / **X** | emotions: excited / curious |
 | **RT / LT** | mouth (either trigger) — RT also quacks; LT rides the "wheee" while held |
 | **D-pad left** | move mode: left stick forward/back and strafe, right stick turns. The mode a pad starts in |
 | **D-pad up** | head mode: left stick head yaw and pitch, right stick neck pitch and head roll. The body holds still |
