@@ -655,7 +655,8 @@ nobody steering the head, it glances about every second or few — mostly left a
 and down, the neck leaning and the beak opening a touch with each look, now and then with a curious tilt — and while it
 holds a look its gaze keeps shifting a little around it. It drifts slightly and breathes (a
 millimetre of height, standing only). The longer nothing happens the calmer it gets, and after a
-while it yawns now and then — beak open, head back, silently. It fades in and out, and any stick or
+while it yawns now and then — beak open, head back, silently. It looks around the straight head:
+a head you left turned eases back to the middle as it starts. It fades in and out, and any stick or
 head command takes the head back. In the D-pad's head modes the pad keeps the head, so this only
 happens in move mode. `journalctl -fu robotd` logs each spell starting and stopping. Every number is
 in `[idle]` — `sudo robotctl configure`, then restart `robotd`.
