@@ -3604,6 +3604,8 @@ async fn control_loop<T: RobotIo>(
             1.0
         };
 
+        // Whether this tick is the deliberate hold that poses the head — and so the beak too.
+        let mut held_posed = false;
         let (mut targets, gain, moving, policy_label) = match (driving, sensors.as_ref()) {
             // The limp-fall sequence, before anything else — `driving` is false throughout,
             // so without this it would fall through to the hold branch and the robot would
@@ -3686,12 +3688,15 @@ async fn control_loop<T: RobotIo>(
             ),
             // Held with the policy off — standing at home or sitting — the head still answers:
             // see `held_head`.
-            _ if hold_poses_head(bringup, snapshot.enabled, &hold) => (
-                held_head(hold, command.head),
-                policy_cfg.gain,
-                false,
-                "held".into(),
-            ),
+            _ if hold_poses_head(bringup, snapshot.enabled, &hold) => {
+                held_posed = true;
+                (
+                    held_head(hold, command.head),
+                    policy_cfg.gain,
+                    false,
+                    "held".into(),
+                )
+            }
             _ => (hold, policy_cfg.gain, false, "held".into()),
         };
         state.moving.store(moving, Ordering::Relaxed);
@@ -3870,11 +3875,12 @@ async fn control_loop<T: RobotIo>(
         }
 
         // The mouth is not part of any policy; the intent, and the idle yawn, are what move it.
-        // Only while driving — a held or homing robot keeps whatever its hold pose says, so
-        // a restart cannot snap a mouth.
+        // Only while driving or in the deliberate hold that poses the head (the pad's rest +
+        // head, where RT still quacks) — a homing robot or one frozen by a fault keeps whatever
+        // its hold pose says, so a restart cannot snap a mouth.
         // An idle yawn opens it further than a client asked, never less: the yawn only runs
         // while nothing asks the robot to move, and a client holding the beak open keeps it so.
-        if driving && theremin_state.is_none() && chorale_state.is_none() {
+        if (driving || held_posed) && theremin_state.is_none() && chorale_state.is_none() {
             targets[duck_control::model::MOUTH_INDEX] =
                 duck_control::model::mouth_target(snapshot.mouth.max(idle.mouth));
         }
@@ -9539,9 +9545,9 @@ mod tests {
         );
     }
 
-    /// **Held at home, the head still answers** — the pad's D-pad down is this: the policy off,
-    /// the robot at its home pose, and the sticks posing the head. The offset lands on the head
-    /// joints only; every other joint keeps the home pose.
+    /// **Held at home, the head and the beak still answer** — the pad's D-pad down is this: the
+    /// policy off, the robot at its home pose, the sticks posing the head and the triggers the beak.
+    /// Every other joint keeps the home pose.
     #[tokio::test]
     async fn held_at_home_the_head_follows_the_command() {
         let io = FakeIo::at(DEFAULT_POSITION).frozen();
@@ -9574,6 +9580,7 @@ mod tests {
 
         let head = [0.1, -0.2, 0.3, -0.1];
         intents.set_head(head);
+        intents.set_mouth(0.8);
         // Long enough for the head's slew to settle at a 2 ms tick.
         tokio::time::sleep(Duration::from_secs(1)).await;
         s.shutdown.store(true, Ordering::Relaxed);
@@ -9583,6 +9590,8 @@ mod tests {
         for (i, (got, home)) in written.positions.iter().zip(DEFAULT_POSITION).enumerate() {
             let want = if HEAD_JOINTS.contains(&i) {
                 home + head[i - HEAD_JOINTS.start]
+            } else if i == duck_control::model::MOUTH_INDEX {
+                duck_control::model::mouth_target(0.8)
             } else {
                 home
             };
