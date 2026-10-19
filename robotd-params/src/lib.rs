@@ -203,7 +203,7 @@ impl Default for PadImuHeadControlParams {
 /// one binding worth not being able to lose.
 ///
 /// The defaults: A sits or stands, B picks up, and the other four play emotions (`emotion.rs`) —
-/// the bumpers nod yes and shake no, Y is excited, X is devastated. The kicks have no button by
+/// the bumpers nod yes and shake no, Y is excited, X is curious. The kicks have no button by
 /// default; `pad bind lb kick_left` puts one back. An emotion whose files are not in `[emotions]
 /// dir` is a skill the robot does not have, so its button does nothing. A named button is
 /// rebound; the rest stay as they were.
@@ -218,7 +218,7 @@ pub struct PadParams {
     pub a: String,
     /// B (East). The ground pick, by default.
     pub b: String,
-    /// X (West). The devastated emotion, by default. Held, it is re-sent every tick, so a
+    /// X (West). The curious emotion, by default. Held, it is re-sent every tick, so a
     /// chaining skill such as the roulade keeps going for as long as it is held.
     pub x: String,
     /// Y (North). The excited emotion, by default.
@@ -236,7 +236,7 @@ impl Default for PadParams {
         Self {
             a: "sit_toggle".to_owned(),
             b: "ground_pick".to_owned(),
-            x: "devastated".to_owned(),
+            x: "curious".to_owned(),
             y: "excited".to_owned(),
             lb: "yes".to_owned(),
             rb: "no".to_owned(),
@@ -2788,7 +2788,7 @@ mod tests {
         let pad = super::PadParams::default();
         assert_eq!(pad.a, "sit_toggle");
         assert_eq!(pad.b, "ground_pick");
-        assert_eq!(pad.x, "devastated");
+        assert_eq!(pad.x, "curious");
         assert_eq!(pad.y, "excited");
         assert_eq!(pad.lb, "yes");
         assert_eq!(pad.rb, "no");

@@ -357,7 +357,7 @@ silently doing nothing when you press it.
 Six buttons are bindable: `a`, `b`, `x`, `y`, `lb`, `rb`. **`lb`/`rb` are the bumpers**, not
 the analog triggers, which are the mouth and the quack. An empty name switches a button off, and
 `pad reset <button>` puts one back. The four other buttons ship with emotions (below): L yes, R
-no, Y excited, X devastated. The kicks have no button by default (`sudo robotctl pad bind lb
+no, Y excited, X curious. The kicks have no button by default (`sudo robotctl pad bind lb
 kick_left` gives them one). X re-sends while held, which is what a chaining skill like the roulade
 wants.
 
