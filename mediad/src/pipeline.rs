@@ -2685,13 +2685,25 @@ mod tests {
     /// Skipped, and loudly, where the plugins are not installed: CI has GStreamer's base and bad
     /// sets but neither `webrtcsink` nor an H.264 encoder, and a test that fails for want of a
     /// plugin says nothing about the pipeline. A machine set up to run `mediad` has them.
+    ///
+    /// **A laptop, not the board.** Twice on 2026-10-20 this test oopsed the RK3566's kernel
+    /// (6.1.84-rockchip) within a second of `mpph264enc` encoding the test pattern, mediad stopped
+    /// or not: the pattern is system memory rather than the camera's dmabuf, which the MPP/RGA
+    /// driver is suspected of mishandling. The camera path ran clean for as long as it was tried.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reader_gets_a_frame_from_the_running_pipeline() {
         gst::init().expect("gstreamer");
-        let missing: Vec<&str> = ["videotestsrc", "webrtcsink", "valve", "h264parse"]
-            .into_iter()
-            .filter(|name| gst::ElementFactory::find(name).is_none())
-            .collect();
+        let missing: Vec<&str> = [
+            "videotestsrc",
+            "webrtcsink",
+            "valve",
+            "h264parse",
+            "mpegtsmux",
+            "udpsink",
+        ]
+        .into_iter()
+        .filter(|name| gst::ElementFactory::find(name).is_none())
+        .collect();
         let no_encoder = ["mpph264enc", "x264enc"]
             .iter()
             .all(|name| gst::ElementFactory::find(name).is_none());
@@ -2701,6 +2713,12 @@ mod tests {
         }
 
         let producer = crate::producer::Producer::local(duck_ipc_proto::build_info!());
+        // The MPEG-TS branch pushes here; a datagram arriving proves it linked and flows.
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("a local UDP port");
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("a read timeout");
+        let mpegts_port = receiver.local_addr().expect("its address").port();
         let settings = Settings {
             host: "127.0.0.1".into(),
             // Not 8443, so a `mediad` already running on this machine is left alone.
@@ -2711,7 +2729,7 @@ mod tests {
             height: 240,
             fps: 15,
             rotation: Rotation::None,
-            mpegts: None,
+            mpegts: Some(("127.0.0.1".into(), mpegts_port)),
         };
         let (pipeline, _channels, frames, _stream, _peers) = start(
             Source::Test,
@@ -2726,7 +2744,13 @@ mod tests {
         let frame = tokio::task::spawn_blocking(move || (0..10).find_map(|_| frames.next_frame()))
             .await
             .expect("the reader thread");
+        let mut datagram = [0u8; 2048];
+        let received = receiver.recv(&mut datagram);
         let _ = pipeline.set_state(gst::State::Null);
+
+        let received = received.expect("MPEG-TS within five seconds; the branch is not flowing");
+        assert_eq!(received, 7 * 188, "seven TS packets per datagram");
+        assert_eq!(datagram[0], 0x47, "a TS packet starts with the sync byte");
 
         let frame = frame.expect("a frame within five seconds; the raw branch is starved");
         assert_eq!((frame.width, frame.height), (320, 240));
