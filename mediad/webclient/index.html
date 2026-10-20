@@ -143,10 +143,6 @@
   #stage:fullscreen { display: grid; place-items: center; background: #000; }
   #stage:fullscreen #videobox { width: min(100vw, 100vh * var(--ar, 1.7778)) !important; }
   #stage:fullscreen #videobox > video { border-radius: 0; }
-  #hud { display: none; position: absolute; top: .75rem; left: .75rem; gap: .75rem;
-         padding: .25rem .6rem; border-radius: 4px; background: rgb(0 0 0 / .55); color: #eee;
-         font: 12px/1.4 ui-monospace, monospace; pointer-events: none; }
-  #stage:fullscreen #hud { display: flex; }
 
   /* **Nothing that needs the robot is pressable before there is one.** Every button in `posture`
      and `do · sound` used to be live from page load, so pressing `init` on a page with no session
@@ -256,7 +252,6 @@
              does the scaling, and neither a resize nor a change of mount rotation needs any code. -->
         <svg id="boxes" preserveAspectRatio="none" aria-hidden="true"></svg>
       </div>
-      <div id="hud"></div>
     </div>
     <div class="row stats">
       <button id="fullscreen" title="fullscreen — f, or double-click the picture when watching">fullscreen</button>
@@ -1524,7 +1519,6 @@ async function readStats() {
   if (pair && pair.currentRoundTripTime !== undefined) {
     $("rtt").textContent = `${Math.round(pair.currentRoundTripTime * 1000)} ms`;
   }
-  drawHud();
 }
 
 // ── a frozen picture is a new session ──────────────────────────────────────────
@@ -1563,23 +1557,9 @@ setInterval(async () => {
 }, 250);
 
 // ── fullscreen ─────────────────────────────────────────────────────────────────
-//
-// The corner of a fullscreen picture says which robot, how full its pack is and whether the
-// stream is keeping up — copied from the rows that already say so, once a second with the stats.
-
-function drawHud() {
-  const safety = $("t-safety").textContent;
-  $("hud").textContent = [
-    $("robot").textContent,
-    `battery ${$("t-battery").textContent}`,
-    `${$("fps").textContent} fps`,
-    safety === "upright" || safety === "–" ? null : safety,
-  ].filter(Boolean).join(" · ");
-}
 
 function toggleFullscreen() {
   if (document.fullscreenElement) { document.exitFullscreen(); return; }
-  drawHud();
   $("stage").requestFullscreen()
     .catch((e) => log("bad", "!! the browser refused fullscreen:", e.message));
 }
