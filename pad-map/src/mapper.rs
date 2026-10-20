@@ -7,7 +7,7 @@ use duck_ipc_proto as proto;
 use robotd_params::pad_axes::{AxisBinding, Sticks};
 
 use crate::buttons::Buttons;
-use crate::hold::{HOME_HOLD, HoldAction, HoldButton, REST_HOLD, SHUTDOWN_HOLD};
+use crate::hold::{HOME_HOLD, HoldAction, HoldButton, REST_HOLD, ROULADE_HOLD, SHUTDOWN_HOLD};
 
 /// What the sticks drive, picked on the D-pad. Modal because two sticks cannot express nine
 /// degrees of freedom.
@@ -111,6 +111,9 @@ pub struct PadFrame {
 /// on the laptop it reads the pad from.
 pub const SOUND_THRESHOLD: f64 = 0.3;
 
+/// The skill X held runs: the `roulade` slot.
+const ROULADE: &str = "roulade";
+
 /// Everything the mapping reads that is not the pad: the controller sections of `robotd.toml`,
 /// read by [`Config::reload`], and the robot's drive mode, which the daemon asks for.
 #[derive(Debug, Clone)]
@@ -148,6 +151,10 @@ pub struct Mapper {
     imu_reference: Option<[f32; 4]>,
     start: HoldButton,
     select: HoldButton,
+    /// X: held, the roulade — see [`ROULADE_HOLD`].
+    x: HoldButton,
+    /// The X hold reached the roulade and X is still down: every tick resends it to keep the chain.
+    rolling: bool,
     /// Trigger levels last tick, for the sound edges: RT quacks on its rising edge, LT
     /// starts the wheee ride. The prototype's threshold.
     prev_rt: f64,
@@ -171,6 +178,8 @@ impl Mapper {
             imu_reference: None,
             start: HoldButton::default(),
             select: HoldButton::default(),
+            x: HoldButton::default(),
+            rolling: false,
             prev_rt: 0.0,
             prev_lt: 0.0,
             up: false,
@@ -182,6 +191,8 @@ impl Mapper {
     pub fn pad_gone(&mut self) {
         self.start.reset();
         self.select.reset();
+        self.x.reset();
+        self.rolling = false;
         self.imu_reference = None;
     }
 
@@ -225,9 +236,10 @@ impl Mapper {
         }
         // Which bindable buttons went down this frame, by their config name. A list rather than
         // a flag apiece, because what each one runs is config now and this mapping does not know.
+        // X is not among them: it is the roulade's, held, below.
         let pressed = Buttons::BINDABLE
             .iter()
-            .filter(|(b, _)| pad.pressed.contains(*b))
+            .filter(|(b, n)| *n != "x" && pad.pressed.contains(*b))
             .map(|(_, n)| *n);
 
         // Start: a tap stands the robot up, then toggles the policy; held, it is the way home.
@@ -356,19 +368,34 @@ impl Mapper {
             )));
         }
 
-        // X held: keep a chaining skill going. The robot starts another when a request lands
-        // near the end of the current one, so "held" is spelled "resent every tick" — as a
-        // notification, because fifty answered requests a second would spend their time waiting
-        // on replies, and the press above already got the real answer.
-        //
-        // Whatever X is bound to, nothing by default: a skill that does not chain simply refuses
-        // the resend, which costs a notification nobody reads. Only X, because it is the button
-        // the prototype held the roulade on.
-        let held = cfg.bindings.skill("x").unwrap_or_default();
-        if pad.held.contains(Buttons::X) && !pad.pressed.contains(Buttons::X) && !held.is_empty() {
-            out.push(Out::Notify(proto::Call::RobotDo(proto::DoParams::new(
-                held.to_owned(),
-            ))));
+        // X: held a second, the roulade, kept going while X stays down. The
+        // robot starts another when a request lands near the end of the current one, so "held" is
+        // spelled "resent every tick" — as a notification, because fifty answered requests a
+        // second would spend their time waiting on replies, and the first one got the real answer.
+        match self.x.tick(
+            pad.held.contains(Buttons::X),
+            pad.released.contains(Buttons::X),
+            now,
+            &[ROULADE_HOLD],
+        ) {
+            HoldAction::Tap => tracing::info!("X tapped — hold it 1 s to roll"),
+            HoldAction::Reached(_) => {
+                tracing::info!("X held 1 s — roulade, for as long as X stays down");
+                self.rolling = true;
+                out.push(Out::Request(proto::Call::RobotDo(proto::DoParams::new(
+                    ROULADE.to_owned(),
+                ))));
+            }
+            HoldAction::Nothing | HoldAction::ReleasedAfter(_) if self.rolling => {
+                if pad.held.contains(Buttons::X) {
+                    out.push(Out::Notify(proto::Call::RobotDo(proto::DoParams::new(
+                        ROULADE.to_owned(),
+                    ))));
+                } else {
+                    self.rolling = false;
+                }
+            }
+            HoldAction::Nothing | HoldAction::ReleasedAfter(_) => {}
         }
 
         // Select: nothing on a tap. Let go between two and four seconds, a rest; held to four, a
@@ -618,6 +645,67 @@ mod tests {
         };
         m.tick(&pad, &cfg, t, &mut out, &mut frame);
         assert_eq!(flashlight(&out), 0, "held is not a second press");
+    }
+
+    /// X tapped does nothing; held a second, the roulade, resent while held. Its `[pad]` binding
+    /// never runs.
+    #[test]
+    fn x_rolls_when_held_a_second_and_a_tap_does_nothing() {
+        let (mut m, cfg, t) = (Mapper::new(), cfg(), Instant::now());
+        let (mut out, mut frame) = (Vec::new(), Vec::new());
+        let ms = |n| t + std::time::Duration::from_millis(n);
+        let roulade = |out: &[Out]| {
+            out.iter()
+                .filter_map(|o| match o {
+                    Out::Request(proto::Call::RobotDo(p)) if p.skill.as_str() == ROULADE => {
+                        Some(true)
+                    }
+                    Out::Notify(proto::Call::RobotDo(p)) if p.skill.as_str() == ROULADE => {
+                        Some(false)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let x = |pressed: bool, held: bool, released: bool| PadFrame {
+            pressed: if pressed { Buttons::X } else { Buttons::NONE },
+            held: if held { Buttons::X } else { Buttons::NONE },
+            released: if released { Buttons::X } else { Buttons::NONE },
+            ..Default::default()
+        };
+        let bound = cfg.bindings.skill("x").unwrap_or_default().to_owned();
+        let binding = |out: &[Out]| {
+            out.contains(&Out::Request(proto::Call::RobotDo(proto::DoParams::new(
+                bound.clone(),
+            ))))
+        };
+
+        m.tick(&x(true, true, false), &cfg, ms(0), &mut out, &mut frame);
+        assert!(!binding(&out), "nothing on the press");
+        m.tick(&x(false, false, true), &cfg, ms(300), &mut out, &mut frame);
+        assert!(!binding(&out), "nor on a tap: {out:?}");
+        assert!(roulade(&out).is_empty());
+
+        m.tick(&x(true, true, false), &cfg, ms(1000), &mut out, &mut frame);
+        m.tick(&x(false, true, false), &cfg, ms(1900), &mut out, &mut frame);
+        assert!(roulade(&out).is_empty(), "not yet a second");
+        m.tick(&x(false, true, false), &cfg, ms(2000), &mut out, &mut frame);
+        assert_eq!(roulade(&out), [true], "a second: the roulade, answered");
+        m.tick(&x(false, true, false), &cfg, ms(2020), &mut out, &mut frame);
+        assert_eq!(roulade(&out), [false], "held: resent to chain");
+        m.tick(&x(false, false, true), &cfg, ms(2040), &mut out, &mut frame);
+        assert!(
+            roulade(&out).is_empty() && !binding(&out),
+            "the release says nothing"
+        );
+        m.tick(
+            &x(false, false, false),
+            &cfg,
+            ms(2060),
+            &mut out,
+            &mut frame,
+        );
+        assert!(roulade(&out).is_empty());
     }
 
     #[test]

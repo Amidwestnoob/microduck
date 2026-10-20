@@ -2622,8 +2622,7 @@ async fn control_loop<T: RobotIo>(
 
         // Emotions, like the skills above: started on a robot the policy drove last tick with no
         // move in flight, and over the moment that stops being true, sound included. One at a
-        // time: a request while one plays is dropped. X re-sends while held, so an emotion on X
-        // plays again when it ends, the way a chaining skill would.
+        // time: a request while one plays is dropped.
         let can_emote = was_driving && shutdown_sit.is_none() && !safety.fallen();
         if let Some((index, quiet)) = intents.take_emotion()
             && let Some((name, wanted)) = state.emotions.get(index)

@@ -356,10 +356,10 @@ silently doing nothing when you press it.
 
 Six buttons are bindable: `a`, `b`, `x`, `y`, `lb`, `rb`. **`lb`/`rb` are the bumpers**, not
 the analog triggers, which are the mouth and the quack. An empty name switches a button off, and
-`pad reset <button>` puts one back. The four other buttons ship with emotions (below): L yes, R
-no, Y excited, X curious. The kicks have no button by default (`sudo robotctl pad bind lb
-kick_left` gives them one). X re-sends while held, which is what a chaining skill like the roulade
-wants.
+`pad reset <button>` puts one back. Three of the others ship with emotions (below): L yes, R
+no, Y excited. The kicks have no button by default (`sudo robotctl pad bind lb
+kick_left` gives them one). **X is the roulade's**: held 1 s it starts, and it goes on chaining for
+as long as X stays down. A tap does nothing, and an `x` binding is not run.
 
 The rest of the pad is not bindable: Start stands the robot up and toggles the policy, the D-pad
 picks what the sticks mean, and held Select cuts torque and powers the robot off — the button that stops a robot is the one worth not
@@ -387,7 +387,7 @@ sudo robotctl pad bind y sad
 ```
 
 While one plays it has the head, the body pose and the beak, the sticks wait, and another request
-is dropped until it ends; on X, which re-sends while held, it plays again for as long as X is held.
+is dropped until it ends.
 A keyframe with `"skill": "sit"` sits the robot down (devastated); it stays seated, and the sit
 toggle stands it up. The directory is read once at startup, so new files need the restart;
 `[emotions] dir` moves it, and in the simulator it is the checkout's `robotd/emotions/`.
@@ -638,8 +638,9 @@ the thumb:
 | --- | --- |
 | **A** / cross | sit ↔ stand |
 | **B** / circle | ground pick |
-| **LB** / **RB** | emotions: yes / no (rebind any of these four with `robotctl pad bind`) |
-| **Y** / **X** | emotions: excited / curious |
+| **LB** / **RB** | emotions: yes / no (rebind these three with `robotctl pad bind`) |
+| **Y** | emotion: excited |
+| **X**, held 1 s | the roulade, chained for as long as X stays down (on a Nintendo-layout pad, the left face button — the green Y) |
 | **RT / LT** | mouth (either trigger) — RT also quacks; LT rides the "wheee" while held |
 | **D-pad left** | move mode: left stick forward/back and strafe, right stick turns. The mode a pad starts in |
 | **D-pad up** | head mode: left stick head yaw and pitch, right stick neck pitch and head roll. The body holds still |

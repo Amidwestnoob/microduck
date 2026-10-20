@@ -1,4 +1,4 @@
-//! Start and Select: buttons whose meaning is how long they stay down.
+//! Start, Select and X: buttons whose meaning is how long they stay down.
 
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,12 @@ pub const REST_HOLD: Duration = Duration::from_secs(2);
 /// Select held this long powers the robot off: `robot.shutdown`, the same sit and rest pose ending
 /// in a power-off. Sent the moment the hold gets here; the release after it does nothing.
 pub const SHUTDOWN_HOLD: Duration = Duration::from_secs(4);
+
+/// X held this long starts the roulade, and the roulade goes on chaining for as long as X stays
+/// down. Let go before it, X is a tap and runs its `[pad]` binding — on the release, because until
+/// then the press may still become a roulade, and an emotion started on the press would hold the
+/// robot through the roulade's start.
+pub const ROULADE_HOLD: Duration = Duration::from_secs(1);
 
 /// A button that does different things depending on how long it is held.
 ///
