@@ -638,7 +638,11 @@ fn main() -> ExitCode {
         // `ExecStopPost` in the unit switches it off.
         {
             let streamer = std::sync::Arc::clone(&streamer);
-            tokio::spawn(mediad::indicator::run(peers, move || streamer.is_streaming()));
+            // The MPEG-TS branch pushes for as long as it exists, so it lights the LED throughout.
+            let mpegts = settings.mpegts.is_some();
+            tokio::spawn(mediad::indicator::run(peers, move || {
+                mpegts || streamer.is_streaming()
+            }));
         }
 
         let media = mediad::session::Media {
