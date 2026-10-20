@@ -438,6 +438,7 @@ fn main() -> ExitCode {
             height,
             fps,
             rotation,
+            mpegts: mediad::pipeline::mpegts_target(),
         };
 
         // `frames` is the raw tap off the tee: the auto-exposure loop meters it, and the

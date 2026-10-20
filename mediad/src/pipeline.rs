@@ -194,6 +194,8 @@ pub struct Settings {
     /// How far the *pipeline* turns the picture; see [`Rotation`]. Almost always `None` — the
     /// capture geometry above is then also what leaves the tee.
     pub rotation: Rotation,
+    /// Where to push MPEG-TS over UDP, from [`mpegts_target`]. `None` builds no such branch.
+    pub mpegts: Option<(String, u16)>,
 }
 
 /// Where the video comes from.
@@ -685,6 +687,21 @@ pub fn start(
         })
         .ok();
 
+    // ── the MPEG-TS branch, for VLC on the LAN, only when asked ─────────────
+    let mpegts_head = match settings.mpegts.as_ref() {
+        Some((target_host, target_port)) => {
+            build_mpegts_branch(&pipeline, target_host, *target_port, bitrate, fps)
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "no MPEG-TS branch; the rest of the pipeline is unaffected"
+                    );
+                })
+                .ok()
+        }
+        None => None,
+    };
+
     if let Some(flip) = flip.as_ref() {
         pipeline
             .add(flip)
@@ -735,6 +752,9 @@ pub fn start(
     if let Some(branch) = stream_branch.as_ref() {
         link_tee_branch(&tee, branch.head())
             .context("could not attach the H.264 branch to the tee")?;
+    }
+    if let Some(head) = mpegts_head.as_ref() {
+        link_tee_branch(&tee, head).context("could not attach the MPEG-TS branch to the tee")?;
     }
 
     // **Watch the bus, or every media failure is silent.**
@@ -937,6 +957,101 @@ fn build_stream_branch(
         encoder,
         encoded,
     })
+}
+
+/// The environment variable that turns the MPEG-TS branch on: `host:port` to push to.
+pub const MPEGTS_ENV: &str = "MEDIAD_MPEGTS_UDP";
+
+/// Where [`MPEGTS_ENV`] says to push MPEG-TS, or `None` when it is unset or unusable.
+///
+/// shortcut: unencrypted, unauthenticated, always on while set — a bench/demo tool for VLC on the
+/// LAN, not a consumer path; make it a call like `media.stream` if it outlives the demo.
+pub fn mpegts_target() -> Option<(String, u16)> {
+    let value = std::env::var(MPEGTS_ENV).ok()?;
+    let parsed = parse_udp_target(&value);
+    if parsed.is_none() {
+        tracing::warn!(
+            value,
+            "{MPEGTS_ENV} is not host:port, so there is no MPEG-TS branch"
+        );
+    }
+    parsed
+}
+
+fn parse_udp_target(value: &str) -> Option<(String, u16)> {
+    let (host, port) = value.trim().rsplit_once(':')?;
+    let port: u16 = port.parse().ok().filter(|&port| port != 0)?;
+    (!host.is_empty()).then(|| (host.to_owned(), port))
+}
+
+/// Build the MPEG-TS branch: `queue ! videoconvert ! enc ! h264parse ! mpegtsmux ! udpsink`, at
+/// the capture's full size and rate. `vlc udp://@:<port>` on `host` plays it.
+///
+/// Its own encoder rather than the valved H.264 branch's, so neither the WebRTC track nor
+/// `media.stream`'s 5 fps copy changes. Returns the queue, which is what the tee links to.
+fn build_mpegts_branch(
+    pipeline: &gst::Pipeline,
+    host: &str,
+    port: u16,
+    bitrate: u32,
+    fps: u32,
+) -> Result<gst::Element> {
+    // Leaky like the other branches: a stalled encoder or network must never hold up the tee.
+    let queue = gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 2u32)
+        .property("max-size-bytes", 0u32)
+        .property("max-size-time", 0u64)
+        .property_from_str("leaky", "downstream")
+        .build()
+        .map_err(|_| anyhow!("no queue element"))?;
+    let convert = make("videoconvert")?;
+    let encoder = make("mpph264enc")
+        .or_else(|_| {
+            tracing::info!("no mpph264enc; falling back to x264enc for the MPEG-TS branch");
+            make("x264enc")
+        })
+        .context("neither mpph264enc nor x264enc is available")?;
+    // A keyframe a second, so a VLC opened mid-stream shows a picture within one.
+    if encoder.find_property("gop").is_some() {
+        encoder.set_property_from_str("gop", &fps.to_string());
+        encoder.set_property_from_str("bps", &bitrate.to_string());
+    } else {
+        encoder.set_property_from_str("key-int-max", &fps.to_string());
+        encoder.set_property_from_str("bitrate", &(bitrate / 1000).to_string());
+        encoder.set_property_from_str("tune", "zerolatency");
+    }
+    // SPS/PPS before every keyframe: a receiver joining late has nothing else to start from.
+    let parse = gst::ElementFactory::make("h264parse")
+        .property("config-interval", -1i32)
+        .build()
+        .map_err(|_| anyhow!("no h264parse element"))?;
+    // Seven 188-byte TS packets per datagram (1316 bytes), which fits an MTU and is what VLC expects.
+    let mux = gst::ElementFactory::make("mpegtsmux")
+        .property("alignment", 7i32)
+        .build()
+        .map_err(|_| anyhow!("no mpegtsmux element; it is in gstreamer1.0-plugins-bad"))?;
+    let sink = gst::ElementFactory::make("udpsink")
+        .property("host", host)
+        .property("port", i32::from(port))
+        .property("sync", false)
+        // Same reason as the H.264 appsink: a sink that never prerolls must not hold the pipeline.
+        .property("async", false)
+        .build()
+        .map_err(|_| anyhow!("no udpsink element; it is in gstreamer1.0-plugins-good"))?;
+
+    let elements = [&queue, &convert, &encoder, &parse, &mux, &sink];
+    pipeline
+        .add_many(elements)
+        .context("could not add the MPEG-TS branch to the pipeline")?;
+    gst::Element::link_many(elements).context("could not link the MPEG-TS branch")?;
+
+    tracing::warn!(
+        host,
+        port,
+        encoder = %encoder.factory().map(|f| f.name().to_string()).unwrap_or_default(),
+        "the camera is streaming unencrypted MPEG-TS over UDP for as long as {MPEGTS_ENV} is set"
+    );
+    Ok(queue)
 }
 
 /// The H.264 branch's output: access units in order, with gaps closed to the next keyframe.
@@ -2543,6 +2658,23 @@ fn open_control_channel(
 mod tests {
     use super::*;
 
+    #[test]
+    fn mpegts_target_is_host_colon_port() {
+        let ok = |host: &str, port| Some((host.to_owned(), port));
+        assert_eq!(
+            parse_udp_target("192.168.1.20:5000"),
+            ok("192.168.1.20", 5000)
+        );
+        assert_eq!(
+            parse_udp_target(" laptop.local:5000\n"),
+            ok("laptop.local", 5000)
+        );
+        assert_eq!(parse_udp_target("192.168.1.20"), None);
+        assert_eq!(parse_udp_target(":5000"), None);
+        assert_eq!(parse_udp_target("host:0"), None);
+        assert_eq!(parse_udp_target("host:99999"), None);
+    }
+
     /// **A reader gets a frame out of the real pipeline.** The rendezvous tests below stand in
     /// for the appsink; this one runs the appsink, on the test pattern, with every branch the
     /// robot has — because the bug this guards was between branches. The valved H.264 sink
@@ -2579,6 +2711,7 @@ mod tests {
             height: 240,
             fps: 15,
             rotation: Rotation::None,
+            mpegts: None,
         };
         let (pipeline, _channels, frames, _stream, _peers) = start(
             Source::Test,
