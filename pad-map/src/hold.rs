@@ -7,26 +7,22 @@ use std::time::{Duration, Instant};
 /// never reaches it, short enough to be the obvious thing to do when the robot is somewhere odd.
 pub const HOME_HOLD: Duration = Duration::from_millis(1500);
 
-/// Select let go after this long, and before [`SHUTDOWN_HOLD`], puts the robot down for a rest:
-/// `robot.rest` — it sits if it is driving, eases into the rest pose, then torque goes off and
-/// every servo reboots. Decided on the release, because until then the hold may still become a
-/// power-off, and both start the same way.
+/// Select let go after this long puts the robot down for a rest: `robot.rest` — it sits if it is
+/// driving, eases into the rest pose, then torque goes off and every servo reboots. Decided on the
+/// release, so a hold is never also a tap.
+///
+/// No hold powers the robot off. A four-second Select used to, and a pad is too easy to leave
+/// pressed in a bag or under a hand for that to be on a button.
 pub const REST_HOLD: Duration = Duration::from_secs(2);
 
-/// Select held this long powers the robot off: `robot.shutdown`, the same sit and rest pose ending
-/// in a power-off. Sent the moment the hold gets here; the release after it does nothing.
-pub const SHUTDOWN_HOLD: Duration = Duration::from_secs(4);
-
 /// X held this long starts the roulade, and the roulade goes on chaining for as long as X stays
-/// down. Let go before it, X is a tap and runs its `[pad]` binding — on the release, because until
-/// then the press may still become a roulade, and an emotion started on the press would hold the
-/// robot through the roulade's start.
+/// down. A tap does nothing: X is the roulade's.
 pub const ROULADE_HOLD: Duration = Duration::from_secs(1);
 
 /// A button that does different things depending on how long it is held.
 ///
 /// Each threshold fires once, on the tick the hold crosses it, so a longer hold walks through
-/// every shorter one on the way — Select cuts torque at two seconds and then powers off at four.
+/// every shorter one on the way.
 /// A release that crossed no threshold is a [`HoldAction::Tap`]; the release after a hold that
 /// did fire says nothing, because the thumb coming off is not a second request.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -109,14 +105,13 @@ impl HoldButton {
 mod tests {
     use super::*;
 
-    const SELECT: [Duration; 2] = [REST_HOLD, SHUTDOWN_HOLD];
+    const SELECT: [Duration; 1] = [REST_HOLD];
     const START: [Duration; 1] = [HOME_HOLD];
 
-    /// Select: a tap does nothing to the robot. Let go between two and four seconds, a rest —
-    /// decided at the release, since the hold could still have become a power-off. Held to four,
-    /// the power-off goes out at four, and its release adds nothing.
+    /// Select: a tap does nothing to the robot. Let go after two seconds, a rest — decided at the
+    /// release, and however long the hold went on, nothing more.
     #[test]
-    fn select_rests_on_a_release_between_two_and_four_and_powers_off_at_four() {
+    fn select_rests_on_a_release_after_two_seconds_and_nothing_else() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let mut select = HoldButton::default();
@@ -130,19 +125,18 @@ mod tests {
         assert_eq!(tick(true, false, 1_000), HoldAction::Nothing);
         assert_eq!(tick(false, true, 2_900), HoldAction::Tap);
 
-        // Let go at 3 s: two seconds reached, four not — a rest, at the release only.
+        // Let go at 3 s: two seconds reached — a rest, at the release only.
         assert_eq!(tick(true, false, 10_000), HoldAction::Nothing);
         assert_eq!(tick(true, false, 12_000), HoldAction::Reached(0));
         assert_eq!(tick(true, false, 12_500), HoldAction::Nothing);
         assert_eq!(tick(false, true, 13_000), HoldAction::ReleasedAfter(0));
         assert_eq!(tick(false, false, 13_020), HoldAction::Nothing);
 
-        // Held to four: the power-off at four, once, and a release that is not a rest.
+        // Held far longer: still the one threshold, and the same rest at the release.
         assert_eq!(tick(true, false, 20_000), HoldAction::Nothing);
         assert_eq!(tick(true, false, 22_000), HoldAction::Reached(0));
-        assert_eq!(tick(true, false, 24_000), HoldAction::Reached(1));
-        assert_eq!(tick(true, false, 24_020), HoldAction::Nothing);
-        assert_eq!(tick(false, true, 25_000), HoldAction::ReleasedAfter(1));
+        assert_eq!(tick(true, false, 30_000), HoldAction::Nothing);
+        assert_eq!(tick(false, true, 31_000), HoldAction::ReleasedAfter(0));
     }
 
     /// Start: a tap is the stand-up / policy toggle, a 1.5 s hold is the way home — and a hold
@@ -254,8 +248,8 @@ mod tests {
         assert_eq!(start.tick(false, true, at(4_100), &START), HoldAction::Tap);
     }
 
-    /// A pad dropping out after the torque cut does not let the rest of that hold power the
-    /// robot off from a fresh start, and its release is not a tap either.
+    /// A pad dropping out after the rest threshold does not let the rest of that hold start a
+    /// fresh one, and its release is neither a rest nor a tap.
     #[test]
     fn a_pad_dropout_after_a_threshold_spends_the_rest_of_the_hold() {
         let t0 = Instant::now();
@@ -271,12 +265,12 @@ mod tests {
         let back = t0 + REST_HOLD + Duration::from_secs(3);
         assert_eq!(select.tick(true, false, back, &SELECT), HoldAction::Nothing);
         assert_eq!(
-            select.tick(true, false, back + SHUTDOWN_HOLD, &SELECT),
+            select.tick(true, false, back + REST_HOLD, &SELECT),
             HoldAction::Nothing,
-            "the tail of a spent hold powers nothing off"
+            "the tail of a spent hold reaches nothing"
         );
         assert_eq!(
-            select.tick(false, true, back + SHUTDOWN_HOLD, &SELECT),
+            select.tick(false, true, back + REST_HOLD, &SELECT),
             HoldAction::Nothing,
             "and its release is not a tap"
         );

@@ -7,7 +7,7 @@ use duck_ipc_proto as proto;
 use robotd_params::pad_axes::{AxisBinding, Sticks};
 
 use crate::buttons::Buttons;
-use crate::hold::{HOME_HOLD, HoldAction, HoldButton, REST_HOLD, ROULADE_HOLD, SHUTDOWN_HOLD};
+use crate::hold::{HOME_HOLD, HoldAction, HoldButton, REST_HOLD, ROULADE_HOLD};
 
 /// What the sticks drive, picked on the D-pad. Modal because two sticks cannot express nine
 /// degrees of freedom.
@@ -398,14 +398,13 @@ impl Mapper {
             HoldAction::Nothing | HoldAction::ReleasedAfter(_) => {}
         }
 
-        // Select: nothing on a tap. Let go between two and four seconds, a rest; held to four, a
-        // power-off. Both sit and ease into the rest pose before torque goes, which is why the
-        // rest waits for the release: until then the same hold may still become a power-off.
+        // Select: nothing on a tap. Let go after two seconds, a rest: sit, ease into the rest pose,
+        // then torque off. No hold powers the robot off — see `REST_HOLD`.
         match self.select.tick(
             pad.held.contains(Buttons::SELECT),
             pad.released.contains(Buttons::SELECT),
             now,
-            &[REST_HOLD, SHUTDOWN_HOLD],
+            &[REST_HOLD],
         ) {
             HoldAction::ReleasedAfter(0) => {
                 tracing::warn!(
@@ -420,16 +419,12 @@ impl Mapper {
             }
             HoldAction::Nothing | HoldAction::ReleasedAfter(_) => {}
             HoldAction::Tap => {
-                tracing::info!("Select tapped — hold it 2 s to rest, 4 s to power off")
+                tracing::info!("Select tapped — hold it 2 s and let go to rest")
             }
             HoldAction::Reached(0) => {
-                tracing::warn!("Select held 2 s — let go to rest, keep holding to power off")
+                tracing::warn!("Select held 2 s — let go to rest")
             }
-            HoldAction::Reached(_) => {
-                self.up = false;
-                tracing::warn!("Select held on — asking the robot to power off");
-                out.push(Out::Request(proto::Call::RobotShutdown));
-            }
+            HoldAction::Reached(_) => {}
         }
 
         // Either trigger opens the mouth; the max wins, as in the prototype — where RT
@@ -706,6 +701,61 @@ mod tests {
             &mut frame,
         );
         assert!(roulade(&out).is_empty());
+    }
+
+    /// Select held for as long as anyone likes powers nothing off: the release is a rest, and
+    /// that is the only thing the hold ever asks for.
+    #[test]
+    fn a_long_select_hold_rests_and_never_powers_off() {
+        let (mut m, cfg, t) = (Mapper::new(), cfg(), Instant::now());
+        let (mut out, mut frame) = (Vec::new(), Vec::new());
+        let mut sent = Vec::new();
+
+        let held = PadFrame {
+            pressed: Buttons::SELECT,
+            held: Buttons::SELECT,
+            ..Default::default()
+        };
+        m.tick(&held, &cfg, t, &mut out, &mut frame);
+        sent.append(&mut out);
+        let held = PadFrame {
+            held: Buttons::SELECT,
+            ..Default::default()
+        };
+        for s in 1..=10 {
+            m.tick(
+                &held,
+                &cfg,
+                t + std::time::Duration::from_secs(s),
+                &mut out,
+                &mut frame,
+            );
+            sent.append(&mut out);
+        }
+        let released = PadFrame {
+            released: Buttons::SELECT,
+            ..Default::default()
+        };
+        m.tick(
+            &released,
+            &cfg,
+            t + std::time::Duration::from_secs(11),
+            &mut out,
+            &mut frame,
+        );
+        sent.append(&mut out);
+
+        assert!(
+            !sent.contains(&Out::Request(proto::Call::RobotShutdown)),
+            "{sent:?}"
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|o| **o == Out::Request(proto::Call::RobotRest))
+                .count(),
+            1,
+            "{sent:?}"
+        );
     }
 
     #[test]
