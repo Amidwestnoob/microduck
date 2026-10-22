@@ -62,8 +62,9 @@ that at full rate here at any pool depth:
 | `NV12` (selects `NM12`) | 19.5 fps | 19.6 fps |
 | `UYVY` (single plane) | 19.7 fps | **29.3 fps** |
 
-`mpph264enc` lists `UYVY` on its sink pad and converts on the RGA, so the 4:2:2 to 4:2:0 step
-costs no CPU.
+`mpph264enc` encodes `UYVY` natively and imports `v4l2src`'s DMABuf as is, so capture to encode
+copies nothing: no CPU pass and no RGA pass. Measured on the board, 1040 of 1040 frames logged
+`using imported buffer` at `GST_DEBUG=mppenc:5`.
 
 **What was ruled out, by measurement rather than argument** — each of these was a plausible
 suspect: `v4l2-ctl` reaches 29.2 fps with either format on the same node; the sensor subdev

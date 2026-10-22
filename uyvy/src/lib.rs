@@ -26,9 +26,9 @@ pub struct Letterbox {
 /// How the camera is mounted, and therefore how far the sampler has to turn the picture.
 ///
 /// **Turned here rather than in the pipeline, and that is a performance decision, not a taste.**
-/// A `videoflip` before the tee cost 145% of a core on the robot: `mpph264enc` hands UYVY→NV12 to
-/// the SoC's 2D engine for free, and the flip's buffers are ones the RGA refuses
-/// (`RGA_BLIT fail: Bad address`), so MPP fell back to converting every frame in software — 97 °C,
+/// A `videoflip` before the tee cost 145% of a core on the robot: `mpph264enc` imports the camera's
+/// DMABuf for free, the flip's buffers are system memory it cannot import and the RGA refuses
+/// (`RGA_BLIT fail: Bad address`), so it fell back to copying every frame in software — 97 °C,
 /// the CPU throttled to 408 MHz, and 8 fps out of a 30 fps camera. This sampler is already
 /// resampling to 320×320, so doing the turn in the same pass costs nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

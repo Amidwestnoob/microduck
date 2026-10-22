@@ -342,10 +342,11 @@ consumer gets an upright picture — is the wrong one, measured on a robot:
 | without the flip | 0 | 0 | ~30 | fine |
 | with the flip | 5522 in one session | 1565 | 7–8 | 97 °C, CPU at 408 MHz |
 
-`mpph264enc` hands the UYVY→NV12 conversion to the SoC's 2D engine and pays nothing for it.
-`videoflip`'s output is a buffer the RGA refuses — `10000 is unsupport format`, then `RGA_BLIT fail:
-Bad address` on a `rect[0, 0, 720, 1280]` — so MPP falls back to converting **every frame in
-software**. That saturates the CPU, the SoC hits its thermal limit, everything throttles to 408 MHz,
+`mpph264enc` encodes `UYVY` natively and imports `v4l2src`'s DMABuf as is, so it pays nothing for a
+frame. `videoflip`'s output is system memory, which it cannot import, so it has to copy every frame
+into its own buffer. It tries the RGA first, which refuses — `10000 is unsupport format`, then
+`RGA_BLIT fail: Bad address` on a `rect[0, 0, 720, 1280]` — and falls back to copying **every frame
+in software**. That saturates the CPU, the SoC hits its thermal limit, everything throttles to 408 MHz,
 and the camera drops frames it cannot deliver. The rotation itself is the smaller half of the bill.
 
 So nothing in the pipeline rotates. The mount is *reported* (`media.video`, once per control
@@ -354,7 +355,7 @@ is free, and a perception consumer folds it into the resampling it already does.
 puts the old behaviour back for a consumer that cannot rotate for itself and can afford this.
 
 The proper fix, if an upright stream is ever genuinely needed, is an RGA element in the plugin set:
-the 2D engine rotates for nothing, which is why the encoder can afford to use it.
+the 2D engine rotates for nothing and writes a DMABuf the encoder can import.
 ### The 3A engine has to be waiting before the stream starts
 
 `rkaiq_3A_server` attaches to the ISP and then waits for a **stream start** event — and it misses one

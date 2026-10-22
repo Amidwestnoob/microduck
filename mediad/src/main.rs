@@ -145,8 +145,8 @@ struct Args {
     /// Rotate in the pipeline as well, so the *encoded stream* comes out upright.
     ///
     /// **Off by default because it is expensive in a way that does not look like rotation.** It
-    /// breaks `mpph264enc`'s zero-copy path to the SoC's 2D engine, so MPP converts every frame in
-    /// software: measured at 97 °C, the CPU throttled to 408 MHz and 8 fps out of a 30 fps camera.
+    /// breaks `mpph264enc`'s zero-copy DMABuf import, so it copies every frame in software:
+    /// measured at 97 °C, the CPU throttled to 408 MHz and 8 fps out of a 30 fps camera.
     /// Worth it only for a consumer that cannot rotate for itself.
     #[arg(long)]
     flip_in_pipeline: bool,

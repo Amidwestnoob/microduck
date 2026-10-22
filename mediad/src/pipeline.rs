@@ -8,7 +8,7 @@
 //!
 //! ```text
 //!                                                ┌─ queue ─ webrtcsink ─ setup → mpph264enc
-//! videotestsrc | camera ─ NV12 ─ videoflip ─ tee ┤          │
+//! videotestsrc | camera ─ UYVY ─ videoflip ─ tee ┤          │
 //!                                                └─ queue ─ │  run-signalling-server=true
 //!                                       (leaky)     │
 //!                                          │        └─ consumer-added → "control" channel
@@ -16,18 +16,19 @@
 //!                                   a frame on request
 //! ```
 //!
-//! **The tee is on raw NV12, before the encoder**, and that placement is the point of it.
+//! **The tee is on raw UYVY, before the encoder**, and that placement is the point of it.
 //! `architecture.md` §5.3 wants a frame on demand for a server-side program — "it wants a frame
 //! every second or two plus a state blob", not a 30 fps H.264 track to decode — and §2 wants
 //! perception next to the sensor, deriving features rather than shipping pixels to `robotd`. Both
 //! need pixels, and taking them off the encoded branch would mean decoding what we just encoded.
 //!
-//! NV12 because that is what the rkisp capture path emits and what `mpph264enc` takes, so nothing
-//! *converts* anywhere: no `videoconvert`, and no RGA pass, between capture and either consumer.
+//! UYVY because the rkisp capture path emits it at full rate and `mpph264enc` encodes it natively,
+//! importing `v4l2src`'s DMABuf as is, so nothing *converts* or copies anywhere: no `videoconvert`,
+//! and no RGA pass, between capture and either consumer. [`start`] has the measurement.
 //!
 //! **Nothing converts and nothing rotates.** The head camera is mounted a quarter turn off, and for
 //! one afternoon this pipeline fixed that with a `videoflip` before the tee — which broke
-//! `mpph264enc`'s zero-copy path to the 2D engine and had MPP converting every frame in software:
+//! `mpph264enc`'s zero-copy import and had it copying every frame in software:
 //! 97 °C, the CPU throttled to 408 MHz, 8 fps out of a 30 fps camera. Rotation is now the
 //! consumer's business, because for both consumers it is free — a CSS transform in the browser, and
 //! a resample the detector was doing anyway. [`Rotation`] has the numbers.
@@ -107,10 +108,10 @@ use tokio::sync::mpsc;
 /// How far the picture is turned *in the pipeline* — which, by default, is not at all.
 ///
 /// **This defaulted to a quarter turn for one afternoon and cost 145% of a core.** `mpph264enc`
-/// hands the UYVY→NV12 conversion to the SoC's 2D engine and pays nothing for it; `videoflip`'s
-/// output is a buffer the RGA refuses — `10000 is unsupport format`, then `RGA_BLIT fail: Bad
-/// address` on a `rect[0, 0, 720, 1280]` — so MPP fell back to converting **every frame in
-/// software**. Measured on the robot: 97 °C, the CPU throttled from 1.8 GHz to 408 MHz, 1565 frames
+/// imports the camera's DMABuf as is and pays nothing for a frame; `videoflip`'s output is system
+/// memory it cannot import, so it copies every frame — on the RGA, which refuses it (`10000 is
+/// unsupport format`, then `RGA_BLIT fail: Bad address` on a `rect[0, 0, 720, 1280]`), and then
+/// **in software**. Measured on the robot: 97 °C, the CPU throttled from 1.8 GHz to 408 MHz, 1565 frames
 /// lost by `v4l2src` in one session, and 8 fps out of a 30 fps camera. The boot before that change
 /// had zero RGA failures and zero lost frames.
 ///
@@ -493,8 +494,9 @@ pub fn start(
     // [`raise_capture_buffers`] for the other half. `v4l2-ctl` reaches 29.2 fps with either
     // format, so this is `v4l2src`'s multi-plane path rather than the driver.
     //
-    // `mpph264enc` lists `UYVY` on its sink pad and converts on the SoC's 2D accelerator, so the
-    // 4:2:2 to 4:2:0 step costs no CPU — the RGA was already doing one operation per frame.
+    // `mpph264enc` encodes `UYVY` natively and imports `v4l2src`'s DMABuf as is: no conversion,
+    // no copy, no RGA pass. On the board every frame logs `using imported buffer` at
+    // `GST_DEBUG=mppenc:5`.
     let caps = gst::Caps::builder("video/x-raw")
         .field("format", CAPTURE_FORMAT)
         .field("width", width as i32)
@@ -510,8 +512,8 @@ pub fn start(
     //
     // `videoflip` from `gstreamer1.0-plugins-good`, and **off unless asked**: see [`Rotation`] for
     // the measurement. It does not merely cost a CPU pass of its own — it takes the encoder's
-    // zero-copy path down with it, because the RGA will not touch what it produces, so the true
-    // price is a software colour conversion of every frame as well.
+    // zero-copy import down with it, because what it produces is system memory the encoder cannot
+    // import and the RGA will not touch, so the true price is a software copy of every frame as well.
     //
     // Left in for the consumer that cannot rotate for itself and can afford this. If that ever
     // becomes the common case, the fix is an RGA element in the plugin set (the 2D engine can

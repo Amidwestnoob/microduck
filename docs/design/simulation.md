@@ -232,7 +232,7 @@ Absent — not exercised at all: the Dynamixel bus driver, the BLE radio, the ca
 3A, the NPU, the hardware encoder and its RGA path, thermals and battery.
 
 **A useful check on that list:** run a week of real bugs past it. A `videoflip` that cost 22 fps by
-breaking the encoder's zero-copy path to the RGA; a 3A engine missing a stream-start event; an
+breaking the encoder's zero-copy DMABuf import; a 3A engine missing a stream-start event; an
 auto-exposure loop that converges once and stops; an INT8 head whose score channel collapses to two
 values; a servo bus dropping reads. The twin would have caught **none** of them. That is not a flaw
 in the design, it is the boundary of it — and hardware stays the only place the drivers are real.
