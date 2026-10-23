@@ -39,7 +39,6 @@
 set -eu
 
 STATE="${DUCK_SIM_STATE:-$HOME/.cache/duck-sim}"
-RL="${DUCK_SIM_RL:-$HOME/Pollen/microduck_rl}"
 PORT="${DUCK_SIM_PORT:-7801}"
 
 # `setsid` is util-linux: Linux has it, a Mac does not. What it buys is a daemon in its own session,
@@ -66,6 +65,31 @@ CAMERAS="${DUCK_SIM_CAMERAS:-}"
 FRAME_PORT="${DUCK_SIM_FRAME_PORT:-7901}"
 SOCK="$STATE/duck.sock"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Where `microduck_rl` is: `DUCK_SIM_RL` if set, else a clone beside this one (what the docs say to
+# do), else the older `~/Pollen/microduck_rl`.
+if [ -n "${DUCK_SIM_RL:-}" ]; then
+    RL="$DUCK_SIM_RL"
+elif [ -d "$REPO/../microduck_rl" ]; then
+    RL="$(cd "$REPO/../microduck_rl" && pwd)"
+else
+    RL="$HOME/Pollen/microduck_rl"
+fi
+no_rl() {
+    die "no simulator at $RL. It is the microduck_rl repo: clone it beside this one ($(dirname "$REPO")/microduck_rl), or set DUCK_SIM_RL=/path/to/microduck_rl."
+}
+
+# The workspace's \`rust-version\` is a floor, and an older rustc fails deep in the dependency graph
+# with "tof@x requires rustc 1.89" — the name of the problem, but not of the fix.
+check_rust() {
+    want="$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$REPO/Cargo.toml" | head -1)"
+    have="$(cd "$REPO" && rustc --version 2>/dev/null | awk '{print $2}')"
+    [ -n "$have" ] || die "no rustc on PATH. Install Rust $want or newer: https://rustup.rs"
+    [ -z "$want" ] && return 0
+    oldest="$(printf '%s\n%s\n' "$want" "$have" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)"
+    [ "$oldest" = "$want" ] ||
+        die "this workspace needs Rust $want or newer and rustc is $have. Run \`rustup update stable\` (or \`rustup toolchain install $want\`)."
+}
 
 say()  { printf '\033[36m==\033[0m %s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -194,6 +218,7 @@ down() {
 # simulated body was — its `--sim` was the older robot-made-of-nothing — and every duck "would not
 # enable". cargo returns in a moment when nothing changed, which is the only case the guard saved.
 build_daemons() {
+    check_rust
     say "building the daemons from $(git -C "$REPO" rev-parse --abbrev-ref HEAD)"
     (cd "$REPO" && cargo build --quiet -p robotd -p robotctl -p tof -p sounds -p configd -p updater)
 }
@@ -220,7 +245,7 @@ policies() {
 }
 
 up() {
-    [ -d "$RL" ] || die "no simulator at $RL. It is the microduck_rl repo — set DUCK_SIM_RL."
+    [ -d "$RL" ] || no_rl
     [ -x "$RL/.venv/bin/python" ] || die "$RL has no .venv. Run \`uv sync\` there first."
     # `.so.<version>` on Linux, `.<version>.dylib` on macOS — the wheel names it after the platform
     # and `ort` dlopens whatever this points at, so both spellings are looked for rather than one.
@@ -560,7 +585,13 @@ PY
 # gravity [0, 0, -1] as surely as a standing one does, so it reported a seated duck as standing
 # while the window showed it sitting. `STAND` is 0.12 and `SIT` is 0.07; halfway is the line.
 # Orientation still matters, for the duck that stood up and then fell over.
-upright() { upright_at "$PORT" "the duck"; }
+upright() {
+    body_up || { say "the sim is not running (nothing on port $PORT). Start it with \`scripts/duck-sim\`."; return 1; }
+    upright_at "$PORT" "the duck"
+}
+body_up() {
+    python3 -c "import socket,sys;s=socket.socket();s.settimeout(.3);sys.exit(0 if s.connect_ex(('127.0.0.1',$PORT))==0 else 1)" 2>/dev/null
+}
 
 upright_at() {
     read_z="$(python3 - "$1" <<'PY'
@@ -622,7 +653,7 @@ has_camera() {
 # The body, on the host in both modes: MuJoCo is not going in a container, and the container shares
 # the host's network namespace so localhost is the same localhost either way.
 start_body() {
-    [ -d "$RL" ] || die "no simulator at $RL. It is the microduck_rl repo — set DUCK_SIM_RL."
+    [ -d "$RL" ] || no_rl
     [ -x "$RL/.venv/bin/python" ] || die "$RL has no .venv. Run \`uv sync\` there first."
     mkdir -p "$STATE"
     say "starting the body from $RL — a MuJoCo window should open"
@@ -1114,7 +1145,10 @@ case "${1:-up}" in
     status)  ctl health | head -4; upright ;;
     monitor) shift; ctl monitor "$@" ;;
     log)     tail -f "$STATE/robotd.log" ;;
-    simlog)  tail -f "$STATE/body.log" ;;
+    simlog)
+        [ -f "$STATE/body.log" ] || die "the sim is not running (no $STATE/body.log). Start it with \`scripts/duck-sim\`."
+        body_up || say "the sim is not running; this is the last body's log"
+        if body_up; then tail -f "$STATE/body.log"; else tail -n 50 "$STATE/body.log"; exit 1; fi ;;
     realtime) realtime ;;
     *)       die "unknown command '$1'. Try: up, boot, shell, down, stand, drive, monitor, ctl, log, simlog, status, realtime" ;;
 esac

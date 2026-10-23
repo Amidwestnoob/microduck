@@ -59,6 +59,12 @@ user did not exist, so its unit never started — a class `up` cannot see at all
 
 ## One duck, no container
 
+**Before the first run:** clone `microduck_rl` beside this repo and run `uv sync` in it. The
+script finds `../microduck_rl` on its own; anywhere else, set `DUCK_SIM_RL=/path/to/microduck_rl`.
+It builds the daemons with your `rustc`, which needs to be at least the workspace's
+`rust-version` (1.89 today; `rustup update stable`). An older one is refused up front instead of
+failing in a dependency.
+
 ```sh
 scripts/duck-sim                # a MuJoCo window opens, the duck stands up, and it is yours
 scripts/duck-sim status         # health, and whether it is standing
