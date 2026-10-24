@@ -96,8 +96,9 @@ impl Reprojector {
     /// the prototype's tuned value.
     pub const FLOOR_SAFETY: f64 = 0.85;
 
-    /// Returns closer than this (horizontally) are discarded: under ~10 cm the
-    /// sensor's own crosstalk produces phantom short readings.
+    /// Returns closer than this horizontally to the sensor are discarded:
+    /// under ~10 cm its own crosstalk produces phantom short readings. This
+    /// is sensor-relative, unlike the trunk-axis distance in [`Zone::Hit`].
     pub const MIN_RANGE_M: f64 = 0.10;
 
     pub fn new(model: &'static Model) -> Self {
@@ -265,7 +266,9 @@ mod tests {
         assert!((0.8..=1.2).contains(&point[0]), "x: {point:?}");
         assert!(point[1].abs() < 0.3, "y: {point:?}");
         assert!((point[2] - sensor.pos[2]).abs() < 0.3, "z: {point:?}");
-        assert!((0.85..=1.15).contains(&range), "range: {range}");
+        // The alpha mount is about 8.2 cm ahead of the trunk axis. A
+        // sensor-relative result (~0.999 m) must fail this sanity check.
+        assert!((1.08..=1.09).contains(&range), "range: {range}");
     }
 
     /// Head pitched down: a bottom-row beam at floor distance is the floor;
